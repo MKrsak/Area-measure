@@ -81,7 +81,7 @@ function loadImage(src) {
     lab: blurLab(toLab(data, W, H), W, H),
     mask: new Uint8Array(W * H),
     maskCanvas: document.createElement('canvas'),
-    seed: null, objectName: '', src, G: null, periodPx: 0,
+    seed: null, objectName: '', src, G: null, periodPx: 0, tickPx: 0, perTick: 1,
     rulerSource: 'not set – place the red handles on the ruler', boxFromAI: false,
     objectSource: 'image analysis (whole photo)',
   });
@@ -114,10 +114,21 @@ function gray() {
 function applyRuler(res, how) {
   const k = srcToWork();
   state.ruler = { a: { x: res.a.x * k, y: res.a.y * k }, b: { x: res.b.x * k, y: res.b.y * k } };
-  state.periodPx = res.periodPx * k;
+  state.periodPx = res.periodPx * k;       // work px per mm (or 1/16 in)
+  state.tickPx = res.tickPx * k;           // work px per visible tick
+  state.perTick = res.perTick;             // mm per visible tick (1 or 5)
+  state.rulerKind = res.kind;
+  if (res.kind === 'unknown') {
+    // ticks found, but not whether they are 1 mm, 5 mm or 1 cm apart
+    state.rulerSource = `${how}: handles placed on tick marks, but their spacing is unclear – type the real distance between the handles`;
+    return;
+  }
   if (autoScale()) setLengthFromTicks(res.ticks);
-  state.rulerSource = `${how}: ${res.ticks} tick intervals, 1 tick = ${(res.periodPx).toFixed(1)} px in the photo`;
+  state.rulerSource = `${how}: ${res.kind} ticks, ${res.tickPx.toFixed(1)} px apart in the photo – check the handles`;
 }
+
+const imperial = () => $('unit').value === 'in';
+const maxSide = () => Math.max(state.src.width, state.src.height);
 
 // assumes 1 mm ticks (metric) or 1/16 in ticks (inch)
 function setLengthFromTicks(n) {
@@ -130,9 +141,18 @@ async function findRulerAuto() {
   setBusy('📏 Reading the ruler tick marks…');
   await nextFrame();
   try {
-    const res = Ruler.detect(gray());
-    if (res) applyRuler(res, 'Found automatically from tick marks');
-    else state.rulerSource = 'ruler not found automatically – drag the red line onto the ruler’s tick marks';
+    // 1. rough location on a reduced image, 2. zoom in on it at full resolution
+    const coarse = Ruler.detect(gray());
+    let res = null;
+    if (coarse) {
+      setBusy('🔍 Zooming in on the ruler…');
+      await nextFrame();
+      res = Ruler.zoomRefine(state.src, coarse.a, coarse.b,
+        { hintPx: coarse.tickPx, half: Math.max(15, coarse.tickPx * 4), imperial: imperial() });
+    }
+    res = res || coarse;
+    if (res) applyRuler(res, 'Found automatically');
+    else state.rulerSource = 'ruler not found automatically – drag the red line roughly onto the ruler (it zooms in and reads the ticks), or set the handles and length by hand';
   } catch (err) {
     console.error(err);
   }
@@ -146,19 +166,26 @@ function rulerAfterUserMove(d) {
   const k = srcToWork();
   const toSrc = (p) => ({ x: p.x / k, y: p.y / k });
   try {
-    if (d.type === 'handle' && state.periodPx) {
+    if (d.type === 'handle' && state.tickPx) {
       const other = d.h === state.ruler.a ? state.ruler.b : state.ruler.a;
-      const s = Ruler.snap(gray(), toSrc(d.h), toSrc(other), state.periodPx / k);
+      const s = Ruler.snap(state.src, toSrc(d.h), toSrc(other), state.tickPx / k);
       d.h.x = s.x * k; d.h.y = s.y * k;
-      const n = Math.round(Math.hypot(state.ruler.b.x - state.ruler.a.x, state.ruler.b.y - state.ruler.a.y) / state.periodPx);
+      if (state.rulerKind === 'unknown') { state.rulerSource = 'handle snapped to a tick – type the real distance between the handles'; return; }
+      const n = ticksBetweenHandles();
       setLengthFromTicks(n);
-      state.rulerSource = `handle snapped to the nearest tick: ${n} tick intervals`;
+      state.rulerSource = `handle snapped to the nearest tick: ${n} ${imperial() ? '× 1/16 in' : 'mm'} – check it`;
       return;
     }
-    const res = Ruler.refine(gray(), toSrc(state.ruler.a), toSrc(state.ruler.b), 0.02);
+    const res = Ruler.zoomRefine(state.src, toSrc(state.ruler.a), toSrc(state.ruler.b),
+      { half: Math.max(15, maxSide() * 0.015), imperial: imperial() });
     if (res) applyRuler(res, 'Ticks read along your line');
-    else state.rulerSource = 'no tick marks found along the line – enter the length manually';
+    else state.rulerSource = 'no tick marks recognised along the line – set the handles on two marks and type their distance';
   } catch (err) { console.error(err); }
+}
+
+function ticksBetweenHandles() {
+  const r = state.ruler;
+  return Math.round(Math.hypot(r.b.x - r.a.x, r.b.y - r.a.y) / state.tickPx) * (state.perTick || 1);
 }
 
 function resegment() {
@@ -830,15 +857,18 @@ function draw() {
 
 function drawLoupe(p, ui) {
   const { W } = state;
-  const R = 70 * ui, zoom = 4;
+  const R = 70 * ui;
+  // show about ±12 mm around the handle (if the scale is known), from the full-resolution photo
+  const zoom = state.periodPx ? Math.max(3, Math.min(14, R / (state.periodPx * 12))) : 5;
   const cx = p.x < W / 2 ? W - R - 10 * ui : R + 10 * ui;
   const cy = R + 10 * ui;
   ctx.save();
   ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.clip();
   ctx.fillStyle = '#000'; ctx.fillRect(cx - R, cy - R, 2 * R, 2 * R);
   const sr = R / zoom;
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(state.workCanvas, p.x - sr, p.y - sr, 2 * sr, 2 * sr, cx - R, cy - R, 2 * R, 2 * R);
+  const k = srcToWork();
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(state.src, (p.x - sr) / k, (p.y - sr) / k, 2 * sr / k, 2 * sr / k, cx - R, cy - R, 2 * R, 2 * R);
   ctx.strokeStyle = '#ff5252'; ctx.lineWidth = 1.5 * ui;
   ctx.beginPath();
   ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy);
@@ -942,10 +972,7 @@ $('rulerLen').addEventListener('input', () => {
   computeArea(); draw();
 });
 $('unit').addEventListener('change', () => {
-  if (autoScale() && state.periodPx) {
-    const n = Math.round(Math.hypot(state.ruler.b.x - state.ruler.a.x, state.ruler.b.y - state.ruler.a.y) / state.periodPx);
-    setLengthFromTicks(n);
-  }
+  if (autoScale() && state.tickPx && state.rulerKind !== 'unknown') setLengthFromTicks(ticksBetweenHandles());
   computeArea(); draw();
 });
 $('autoScale').addEventListener('change', () => {
@@ -1112,7 +1139,9 @@ function applyAI(r) {
     const k = srcToWork();
     const A = { x: sx(p1.x) / k, y: sy(p1.y) / k }, B = { x: sx(p2.x) / k, y: sy(p2.y) / k };
     let res = null;
-    try { if (autoScale()) res = Ruler.refine(gray(), A, B, 0.06); } catch (err) { console.error(err); }
+    try {
+      if (autoScale()) res = Ruler.zoomRefine(state.src, A, B, { half: maxSide() * 0.05, imperial: unit === 'in' });
+    } catch (err) { console.error(err); }
     if (res) {
       applyRuler(res, '✨ AI located the ruler, tick marks measured');
       msgs.push('Ruler: located by AI, scale measured from the tick marks.');

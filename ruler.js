@@ -9,8 +9,12 @@
    3. Sample the brightness along lines parallel to it, pick the one that
       crosses all small ticks, and measure the tick period very precisely
       with autocorrelation over many ticks.
-   4. Find the tick positions (phase) and place the two handles exactly on
-      ticks; the distance = number of tick intervals.
+   4. "Zoom in": cut a strip around that rough line out of the full-resolution
+      photo (enlarged if the ticks are small) and measure there.
+   5. Find the tick positions (phase) and their lengths: every 5th/10th tick
+      is longer → tells mm ticks from 5 mm ticks and where the cm marks are.
+      The handles are placed on cm marks; distance = number of mm.
+   Best effort – the user can always correct the handles and the length.
    ========================================================================= */
 
 const Ruler = (() => {
@@ -18,17 +22,43 @@ const Ruler = (() => {
   const MAX_SIDE = 2400;      // resolution used for ruler analysis
   const SUB = 2;              // profile samples per pixel (fine ticks, ~3 px apart)
 
-  function makeGray(src) {
-    const s = Math.min(1, MAX_SIDE / Math.max(src.width, src.height));
-    const w = Math.round(src.width * s), h = Math.round(src.height * s);
+  // grayscale image; optionally only a crop of the source, scaled by `zoom`.
+  // G pixel (gx, gy) ↔ source pixel (gx / scale + ox, gy / scale + oy)
+  function makeGray(src, crop = null, zoom = 0) {
+    const cx = crop ? crop.x : 0, cy = crop ? crop.y : 0;
+    const cw = crop ? crop.w : src.width, ch = crop ? crop.h : src.height;
+    const s = zoom || Math.min(1, MAX_SIDE / Math.max(cw, ch));
+    const w = Math.max(1, Math.round(cw * s)), h = Math.max(1, Math.round(ch * s));
     const c = document.createElement('canvas');
     c.width = w; c.height = h;
     const x = c.getContext('2d', { willReadFrequently: true });
-    x.drawImage(src, 0, 0, w, h);
+    x.imageSmoothingQuality = 'high';
+    x.drawImage(src, cx, cy, cw, ch, 0, 0, w, h);
     const d = x.getImageData(0, 0, w, h).data;
     const g = new Float32Array(w * h);
     for (let i = 0; i < g.length; i++) g[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
-    return { g, w, h, scale: s };
+    return { g, w, h, scale: s, ox: cx, oy: cy };
+  }
+  const toG = (G, p) => ({ x: (p.x - G.ox) * G.scale, y: (p.y - G.oy) * G.scale });
+  const toSrc = (G, p) => ({ x: p.x / G.scale + G.ox, y: p.y / G.scale + G.oy });
+
+  // strip of the full-resolution photo around a rough line, enlarged so that
+  // the expected smallest ticks are a few pixels apart
+  function zoomStrip(src, a, b, half, zoom, extend = 0.15) {
+    const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    const d = { x: (b.x - a.x) / len, y: (b.y - a.y) / len }, n = { x: -d.y, y: d.x };
+    const ext = len * extend + half;
+    const pts = [];
+    for (const [p, s] of [[a, -1], [b, 1]]) for (const o of [-half, half])
+      pts.push({ x: p.x + d.x * ext * s + n.x * o, y: p.y + d.y * ext * s + n.y * o });
+    const x0 = Math.max(0, Math.floor(Math.min(...pts.map((p) => p.x))));
+    const y0 = Math.max(0, Math.floor(Math.min(...pts.map((p) => p.y))));
+    const x1 = Math.min(src.width, Math.ceil(Math.max(...pts.map((p) => p.x))));
+    const y1 = Math.min(src.height, Math.ceil(Math.max(...pts.map((p) => p.y))));
+    if (x1 - x0 < 8 || y1 - y0 < 8) return null;
+    // keep the strip at a reasonable size (memory / speed)
+    zoom = Math.min(zoom, 3400 / Math.max(x1 - x0, y1 - y0), Math.sqrt(9e6 / ((x1 - x0) * (y1 - y0))));
+    return makeGray(src, { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, zoom);
   }
 
   /* ---------- FFT (radix-2, in place) ---------- */
@@ -173,7 +203,7 @@ const Ruler = (() => {
     if (!bL) return null;
     // prefer the smallest lag that is almost as strong (fundamental, not a multiple)
     for (let L = lo; L < bL; L++)
-      if (r[L] > r[L - 1] && r[L] >= r[L + 1] && r[L] > 0.75 * best && Math.abs(bL / L - Math.round(bL / L)) < 0.15) { best = r[L]; bL = L; break; }
+      if (r[L] > r[L - 1] && r[L] >= r[L + 1] && r[L] > Math.max(0.3, 0.55 * best) && Math.abs(bL / L - Math.round(bL / L)) < 0.15) { best = r[L]; bL = L; break; }
     return { P: refinePeak(r, bL), r: best };
   }
 
@@ -201,7 +231,7 @@ const Ruler = (() => {
   function refineLine(G, o, d, t0, t1, offRange, pMin, pMax) {
     const n = { x: -d.y, y: d.x };
     let best = null;
-    const step = Math.max(1, offRange / 16);
+    const step = Math.max(1, Math.min(offRange / 16, pMin * 1.5));
     for (let off = -offRange; off <= offRange; off += step) {
       const oo = { x: o.x + n.x * off, y: o.y + n.y * off };
       const raw = profile(G, oo, d, t0, t1);
@@ -217,7 +247,28 @@ const Ruler = (() => {
   // the initial direction may be a few degrees off: find the best offset near
   // both ends separately and fit the line through them, then measure along the
   // whole line (clipped to the image)
-  function fitLine(G, o, d, t0, t1, offRange, pMin, pMax) {
+  function fitLine(G, o, d, t0, t1, offRange, pMin, pMax, angSearch = false) {
+    if (angSearch) {
+      // a hand-placed or AI line can be tilted against the ruler: try small rotations
+      // around its middle and keep the one that crosses the ticks most cleanly
+      const tm = (t0 + t1) / 2, c = { x: o.x + d.x * tm, y: o.y + d.y * tm };
+      // short middle section, angle step small enough not to slide off short ticks
+      const hs = Math.min((t1 - t0) / 2, pMax * 20);
+      const step = Math.max(0.4, Math.min(2, Math.atan2(pMin * 1.5, hs) * 180 / Math.PI));
+      let best = null;
+      for (let deg = -8; deg <= 8 + 1e-9; deg += step) {
+        const r = deg * Math.PI / 180;
+        const dd = { x: d.x * Math.cos(r) - d.y * Math.sin(r), y: d.x * Math.sin(r) + d.y * Math.cos(r) };
+        const line = refineLine(G, c, dd, -hs, hs, offRange, pMin, pMax);
+        if (line && (!best || line.r > best.line.r)) best = { line, dd };
+      }
+      if (!best) return null;
+      const n = { x: -best.dd.y, y: best.dd.x };
+      const half = (t1 - t0) / 2;
+      o = { x: c.x + n.x * best.line.off - best.dd.x * half, y: c.y + n.y * best.line.off - best.dd.y * half };
+      d = best.dd; t1 = t1 - t0; t0 = 0;
+      offRange = Math.max(6, offRange / 4);
+    }
     for (let it = 0; it < 2; it++) {
       const L = t1 - t0, seg = Math.max(pMax * 8, L / 3);
       const n = { x: -d.y, y: d.x };
@@ -308,23 +359,84 @@ const Ruler = (() => {
     const medC = cs2.slice().sort((p, q) => p - q)[cs2.length >> 1] || 0;
     while (k1 > k0 && contrast(k0) < medC * 0.4) k0++;
     while (k1 > k0 && contrast(k1) < medC * 0.4) k1--;
-    return { first: phase + k0 * P, count: k1 - k0, start: bs, end: be, sharp };
+    return { first: phase + k0 * P, count: k1 - k0, start: bs, end: be, sharp, dark };
   }
 
-  function finish(G, line, P) {
+  // length of each tick (how far its contrast continues across the ruler)
+  function tickLengths(G, line, tk) {
+    const { o, d } = line, n = { x: -d.y, y: d.x };
+    const Ppx = line.P / SUB, sgn = tk.dark ? -1 : 1;
+    const at = (t, off) => sample(G, o.x + d.x * t + n.x * off, o.y + d.y * t + n.y * off);
+    const con = (t, off) => sgn * (at(t, off) - (at(t - Ppx / 2, off) + at(t + Ppx / 2, off)) / 2);
+    const ts = [];
+    for (let k = 0; k <= tk.count; k++) ts.push(line.t0 + (tk.first + k * line.P) / SUB);
+    const c0 = ts.map((t) => con(t, 0)).filter((v) => !isNaN(v)).sort((p, q) => p - q);
+    const ref = c0[c0.length >> 1];
+    if (!(ref > 0)) return null;
+    const maxO = Math.round(Ppx * 14);
+    return ts.map((t) => {
+      let len = 0;
+      for (const s of [1, -1]) {
+        let last = 0, gap = 0;
+        for (let off = 1; off <= maxO; off++) {
+          const v = con(t, s * off);
+          if (isNaN(v)) break;
+          if (v > ref * 0.35) { last = off; gap = 0; } else if (++gap > 2) break;
+        }
+        len += last;
+      }
+      return len;
+    });
+  }
+
+  // which ticks are long? → tick size (1 mm or 5 mm) and the cm-mark phase
+  function classify(L, imperial) {
+    const n = L.length;
+    if (!L || n < 12) return { perTick: 1, kind: 'unknown' };
+    const m = L.reduce((p, q) => p + q, 0) / n;
+    const z = L.map((v) => v - m);
+    const z2 = z.reduce((p, q) => p + q * q, 0) || 1;
+    const ac = (lag) => { let s = 0; for (let i = 0; i + lag < n; i++) s += z[i] * z[i + lag]; return s / z2 * n / (n - lag); };
+    const bestRes = (mod) => {
+      let br = 0, bv = -Infinity;
+      for (let r = 0; r < mod; r++) {
+        let s = 0, c = 0;
+        for (let k = r; k < n; k += mod) { s += L[k]; c++; }
+        if (c && s / c > bv) { bv = s / c; br = r; }
+      }
+      return br;
+    };
+    if (imperial) return ac(16) > 0.2 || ac(8) > 0.2 ? { perTick: 1, kind: '1/16 in', res: bestRes(16), mod: 16 } : { perTick: 1, kind: 'unknown' };
+    const a2 = ac(2), a5 = ac(5), a10 = ac(10);
+    if (a2 > 0.3 && a2 > a5) return { perTick: 5, kind: '5 mm', res: bestRes(2), mod: 2 };
+    if (a5 > 0.2 || a10 > 0.2) return { perTick: 1, kind: '1 mm', res: bestRes(10), mod: 10 };
+    return { perTick: 1, kind: 'unknown' };
+  }
+
+  function finish(G, line, P, opts = {}) {
     const tk = locateTicks(line.x, P);
     if (!tk || tk.count < 5) return null;
-    let N = tk.count;
-    if (N >= 20) N -= N % 10;         // whole centimetres look nicer
-    else if (N >= 10) N -= N % 5;
-    // center the chosen span within the detected ticks
-    const shift = Math.floor((tk.count - N) / 2);
-    const tA = line.t0 + (tk.first + shift * P) / SUB, tB = tA + N * P / SUB;
+    const cls = classify(tickLengths(G, line, tk), opts.imperial);
+    let k0, k1;
+    if (cls.mod && tk.count >= cls.mod) {
+      // from the first to the last long (cm / inch) mark
+      k0 = cls.res;
+      k1 = cls.res + Math.floor((tk.count - cls.res) / cls.mod) * cls.mod;
+    }
+    if (k0 === undefined || k1 - k0 < cls.mod) {
+      let N = tk.count;
+      if (N >= 20) N -= N % 10; else if (N >= 10) N -= N % 5;
+      k0 = Math.floor((tk.count - N) / 2); k1 = k0 + N;
+    }
+    const tA = line.t0 + (tk.first + k0 * P) / SUB, tB = line.t0 + (tk.first + k1 * P) / SUB;
     const { o, d } = line;
+    const tickPx = P / SUB / G.scale;
     return {
-      a: { x: (o.x + d.x * tA) / G.scale, y: (o.y + d.y * tA) / G.scale },
-      b: { x: (o.x + d.x * tB) / G.scale, y: (o.y + d.y * tB) / G.scale },
-      ticks: N, periodPx: P / SUB / G.scale, strength: line.r,
+      a: toSrc(G, { x: o.x + d.x * tA, y: o.y + d.y * tA }),
+      b: toSrc(G, { x: o.x + d.x * tB, y: o.y + d.y * tB }),
+      ticks: (k1 - k0) * cls.perTick,          // in mm (or 1/16 in)
+      periodPx: tickPx / cls.perTick,          // source px per mm
+      tickPx, perTick: cls.perTick, kind: cls.kind, strength: line.r,
     };
   }
 
@@ -421,35 +533,51 @@ const Ruler = (() => {
     return finish(G, best.line, best.line.P);
   }
 
-  // refine around an approximate ruler line (from AI or from the user)
-  function refine(G, a, b, searchFrac = 0.04) {
-    const A = { x: a.x * G.scale, y: a.y * G.scale }, B = { x: b.x * G.scale, y: b.y * G.scale };
-    const len = Math.hypot(B.x - A.x, B.y - A.y);
-    if (len < 40) return null;
-    const d = { x: (B.x - A.x) / len, y: (B.y - A.y) / len };
-    const ext = len * 0.15;
-    const off = Math.max(8, Math.max(G.w, G.h) * searchFrac);
-    const line = fitLine(G, A, d, -ext, len + ext, off, 2.8, 30);
-    if (!line) return null;
-    return finish(G, line, line.P);
+  // measure ticks in a zoomed, full-resolution strip around a rough line
+  // (a, b in source px). hintPx: rough tick spacing in source px, if known.
+  function zoomRefine(src, a, b, { hintPx = 0, half = 0, imperial = false } = {}) {
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (len < 20) return null;
+    half = half || Math.max(20, len * 0.06);
+    // aim for ≥ ~7 px per smallest tick; the hint might be a 5 mm or 1 cm spacing
+    const zoom = hintPx ? Math.max(1, Math.min(4, 70 / hintPx)) : Math.max(1, Math.min(3, 2000 / len));
+    // the strip reaches well past the rough line – the ruler is often longer
+    const G = zoomStrip(src, a, b, half, zoom, 0.6);
+    if (!G) return null;
+    const A = toG(G, a), B = toG(G, b);
+    const L = Math.hypot(B.x - A.x, B.y - A.y);
+    const d = { x: (B.x - A.x) / L, y: (B.y - A.y) / L };
+    const pMax = hintPx ? Math.min(80, hintPx * G.scale * 1.35) : 64;
+    // finest ticks first; if they are too blurry, look for the 5 mm / cm ticks
+    for (const [lo, hi] of [[2.8, 20], [8, 40], [16, 64]]) {
+      if (lo * 1.5 > pMax) break;
+      const line = fitLine(G, A, d, -L * 0.15, L * 1.15, half * G.scale, lo, Math.min(hi, pMax), !hintPx);
+      if (!line || line.r < 0.45) continue;
+      const tk = locateTicks(line.x, line.P);
+      if (!tk || tk.count < 8) continue;
+      const res = finish(G, line, line.P, { imperial });
+      if (res) return res;
+    }
+    return null;
   }
 
-  // snap one point to the nearest tick along the ruler direction
-  function snap(G, p, other, periodPx) {
-    const P = { x: p.x * G.scale, y: p.y * G.scale }, Q = { x: other.x * G.scale, y: other.y * G.scale };
-    const len = Math.hypot(Q.x - P.x, Q.y - P.y);
+  // snap one point (source px) to the nearest tick along the ruler direction
+  function snap(src, p, other, tickPx) {
+    const len = Math.hypot(other.x - p.x, other.y - p.y);
     if (len < 10) return p;
-    const d = { x: (Q.x - P.x) / len, y: (Q.y - P.y) / len };
-    const per = periodPx * G.scale;
-    const R = per * 5;
-    const ps = per * SUB;
-    const x = detrend(profile(G, P, d, -R, R), ps * 0.75);
+    const zoom = Math.max(1, Math.min(4, 8 / tickPx));
+    const dd = { x: (other.x - p.x) / len, y: (other.y - p.y) / len };
+    const R = tickPx * 6;
+    const G = zoomStrip(src, { x: p.x - dd.x * R, y: p.y - dd.y * R }, { x: p.x + dd.x * R, y: p.y + dd.y * R }, tickPx * 3, zoom);
+    if (!G) return p;
+    const P = toG(G, p), per = tickPx * G.scale, Rg = R * G.scale, ps = per * SUB;
+    const x = detrend(profile(G, P, dd, -Rg, Rg), ps * 0.75);
     const tk = locateTicks(x, ps, 3);
     if (!tk) return p;
-    const k = Math.round((R * SUB - tk.first) / ps);
-    const t = -R + (tk.first + k * ps) / SUB;
-    return { x: (P.x + d.x * t) / G.scale, y: (P.y + d.y * t) / G.scale };
+    const k = Math.round((Rg * SUB - tk.first) / ps);
+    const t = -Rg + (tk.first + k * ps) / SUB;
+    return toSrc(G, { x: P.x + dd.x * t, y: P.y + dd.y * t });
   }
 
-  return { makeGray, detect, refine, snap };
+  return { makeGray, detect, zoomRefine, snap };
 })();
