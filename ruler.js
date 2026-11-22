@@ -35,6 +35,7 @@ const Ruler = (() => {
     x.imageSmoothingQuality = 'high';
     x.drawImage(src, cx, cy, cw, ch, 0, 0, w, h);
     const d = x.getImageData(0, 0, w, h).data;
+    c.width = c.height = 0;   // free canvas memory right away (iOS Safari has a tight limit)
     const g = new Float32Array(w * h);
     for (let i = 0; i < g.length; i++) g[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
     return { g, w, h, scale: s, ox: cx, oy: cy };
@@ -57,7 +58,7 @@ const Ruler = (() => {
     const y1 = Math.min(src.height, Math.ceil(Math.max(...pts.map((p) => p.y))));
     if (x1 - x0 < 8 || y1 - y0 < 8) return null;
     // keep the strip at a reasonable size (memory / speed)
-    zoom = Math.min(zoom, 3400 / Math.max(x1 - x0, y1 - y0), Math.sqrt(9e6 / ((x1 - x0) * (y1 - y0))));
+    zoom = Math.min(zoom, 3400 / Math.max(x1 - x0, y1 - y0), Math.sqrt(6e6 / ((x1 - x0) * (y1 - y0))));
     return makeGray(src, { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, zoom);
   }
 

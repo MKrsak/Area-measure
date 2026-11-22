@@ -155,6 +155,7 @@ async function findRulerAuto() {
     else state.rulerSource = 'ruler not found automatically – drag the red line roughly onto the ruler (it zooms in and reads the ticks), or set the handles and length by hand';
   } catch (err) {
     console.error(err);
+    state.rulerSource = `ruler detection failed (${err && err.message ? err.message : err}) – place the handles by hand`;
   }
   setBusy('');
   resegment();
@@ -180,7 +181,10 @@ function rulerAfterUserMove(d) {
       { half: Math.max(15, maxSide() * 0.015), imperial: imperial() });
     if (res) applyRuler(res, 'Ticks read along your line');
     else state.rulerSource = 'no tick marks recognised along the line – set the handles on two marks and type their distance';
-  } catch (err) { console.error(err); }
+  } catch (err) {
+    console.error(err);
+    state.rulerSource = `reading the ticks failed (${err && err.message ? err.message : err}) – type the length by hand`;
+  }
 }
 
 function ticksBetweenHandles() {
@@ -391,27 +395,36 @@ function rulerMask() {
   const bright = cs.slice(cs.length >> 1);
   const med = (k) => bright.map((c) => c[k]).sort((p, q) => p - q)[bright.length >> 1];
   const body = [med(0), med(1), med(2)];
-  const like = (i) => {
-    if (i < 0) return false;
+  // 2 = ruler body color, 1 = dark (ticks, digits), 0 = something else
+  const kind = (i) => {
+    if (i < 0) return 0;
     const dL = lab[i] - body[0], dA = lab[i + 1] - body[1], dB = lab[i + 2] - body[2];
-    return dL * dL + dA * dA + dB * dB < 18 * 18 || lab[i] < body[0] - 25;
+    if (dL * dL + dA * dA + dB * dB < 18 * 18) return 2;
+    return lab[i] < body[0] - 25 ? 1 : 0;
   };
+  const like = (i) => kind(i) === 2;
   const maxO = 45 * mm, gapMax = Math.max(3, 2 * mm);
   // width on both sides
   const ext = {};
   for (const side of [1, -1]) {
     const v = [];
     for (let t = 0; t <= len; t += Math.max(3, 5 * mm)) {
-      let last = 0, gap = 0;
+      // dark pixels count only in short runs (ticks, digits) – a long dark run
+      // is a neighbouring object, not the ruler
+      let last = 0, gap = 0, dark = 0;
       for (let o = 0; o <= maxO; o++) {
-        if (like(px(t, side * o))) { last = o; gap = 0; } else if (++gap > gapMax) break;
+        const kd = kind(px(t, side * o));
+        if (kd === 2) { last = o; gap = 0; dark = 0; }
+        else if (kd === 1 && ++dark <= 4 * mm) { gap = 0; }
+        else if (++gap > gapMax) break;
       }
       v.push(last);
     }
     v.sort((p, q) => p - q);
     ext[side] = v[v.length >> 1] || 0;
   }
-  const o0 = -ext[-1] - 2, o1 = ext[1] + 2;
+  const pad = 2 + 1.5 * mm;               // plus the shadow / gap right next to it
+  const o0 = -ext[-1] - pad, o1 = ext[1] + pad;
   // extend along the ruler while a cross-section still looks like the ruler
   const along = (dir) => {
     let last = dir > 0 ? len : 0, gap = 0;
@@ -557,6 +570,7 @@ function convexFill(m, W, H) {
   hull.forEach(([px, py], i) => (i ? x.lineTo(px + 0.5, py + 0.5) : x.moveTo(px + 0.5, py + 0.5)));
   x.closePath(); x.fill();
   const d = x.getImageData(0, 0, W, H).data;
+  c.width = c.height = 0;
   const out = new Uint8Array(W * H);
   for (let i = 0; i < out.length; i++) out[i] = d[i * 4 + 3] > 127 ? 1 : 0;
   return out;

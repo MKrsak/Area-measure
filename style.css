@@ -83,3 +83,4 @@ canvas {
 .sources { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; margin: 8px 0 0; font-size: .85rem; text-align: left; }
 .sources dt { font-weight: 600; color: var(--muted); }
 .sources dd { margin: 0; }
+.version { text-align: center; color: var(--muted); font-size: .75rem; margin: 0 0 16px; }
