@@ -79,3 +79,7 @@ canvas {
   .controls { grid-template-columns: 1fr; }
   .area { font-size: 1.8rem; }
 }
+.controls label.check { flex-direction: row; align-items: center; gap: 8px; grid-column: 1 / -1; }
+.sources { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; margin: 8px 0 0; font-size: .85rem; text-align: left; }
+.sources dt { font-weight: 600; color: var(--muted); }
+.sources dd { margin: 0; }

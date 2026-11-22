@@ -32,6 +32,10 @@
       <div class="result" id="result">
         <div class="area" id="areaValue">–</div>
         <div class="detail" id="areaDetail"></div>
+        <dl class="sources">
+          <dt>Object</dt><dd id="srcObject"></dd>
+          <dt>Scale</dt><dd id="srcRuler"></dd>
+        </dl>
       </div>
 
       <div class="canvasWrap">
@@ -46,6 +50,7 @@
       <p class="hint" id="modeHint"></p>
 
       <div class="controls">
+        <label class="check"><input id="autoScale" type="checkbox" checked> Read the scale from the ruler tick marks automatically (1 tick = 1 mm, or 1/16 in)</label>
         <label>Ruler length between handles
           <span class="inline">
             <input id="rulerLen" type="number" min="0.01" step="any" value="10">
@@ -59,11 +64,13 @@
         <label>Detection sensitivity
           <input id="sensitivity" type="range" min="0.4" max="1.8" step="0.05" value="1">
         </label>
+        <label class="check"><input id="convex" type="checkbox"> Object has a convex shape (book, box, card, plate…) – fill the outline</label>
       </div>
 
       <div class="row">
         <button class="btn primary" id="aiBtn" disabled>✨ Detect with Chrome AI</button>
         <button class="btn" id="autoBtn">🔍 Auto-detect object</button>
+        <button class="btn" id="rulerBtn">📏 Find ruler again</button>
       </div>
       <p id="aiResult" class="status"></p>
     </section>
@@ -73,13 +80,14 @@
       <ul>
         <li>Shoot straight from above, with the ruler lying flat in the <b>same plane</b> as the object.</li>
         <li>Use a plain, contrasting background and even lighting (avoid strong shadows).</li>
-        <li>Always check the ruler handles – zoom in with the magnifier and place them exactly on two tick marks, then type their distance.</li>
+        <li>The app reads the ruler’s tick marks and places the handles on them automatically. Check them – if needed, drag the red line onto the tick marks (it re-reads them) or drag a handle (it snaps to the nearest tick). You can also type the length yourself.</li>
         <li>If the outline is wrong, drag a box around the object or tap on it, and adjust the sensitivity.</li>
       </ul>
       <p class="small">Chrome AI uses Gemini Nano running locally in Chrome (Prompt API with image input). Your photo never leaves your device. If it is not available, everything still works with the built-in image analysis and manual adjustment.</p>
     </section>
   </main>
 
+  <script src="ruler.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

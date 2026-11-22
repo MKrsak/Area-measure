@@ -28,6 +28,13 @@ const state = {
   drag: null,
   objectName: '',
   pointer: null,
+  src: null,          // original image
+  G: null,            // grayscale for ruler analysis (lazy)
+  periodPx: 0,        // detected tick spacing (work px)
+  rulerSource: '',    // text describing where the scale came from
+  objectSource: '',   // text describing how the object was found
+  boxFromAI: false,
+  busy: '',           // message shown over the image while working
 };
 
 /* ------------------------------------------------------------------ input */
@@ -46,7 +53,8 @@ async function onFile(e) {
     bmp = await loadViaImg(file);
   }
   loadImage(bmp);
-  if (ai.status === 'available') runAI();
+  await findRulerAuto();
+  if (ai.status === 'available') await runAI();
 }
 
 function loadViaImg(file) {
@@ -73,7 +81,9 @@ function loadImage(src) {
     lab: blurLab(toLab(data, W, H), W, H),
     mask: new Uint8Array(W * H),
     maskCanvas: document.createElement('canvas'),
-    seed: null, objectName: '',
+    seed: null, objectName: '', src, G: null, periodPx: 0,
+    rulerSource: 'not set – place the red handles on the ruler', boxFromAI: false,
+    objectSource: 'image analysis (whole photo)',
   });
   state.maskCanvas.width = W; state.maskCanvas.height = H;
 
@@ -87,6 +97,68 @@ function loadImage(src) {
   $('aiResult').textContent = '';
   setMode('ruler');
   segmentBox();
+}
+
+/* ----------------------------------------------------------------- ruler */
+
+const nextFrame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+const autoScale = () => $('autoScale').checked;
+const srcToWork = () => state.W / state.src.width;
+
+function gray() {
+  if (!state.G) state.G = Ruler.makeGray(state.src);
+  return state.G;
+}
+
+// result from Ruler.* (source-image px) → handles + length
+function applyRuler(res, how) {
+  const k = srcToWork();
+  state.ruler = { a: { x: res.a.x * k, y: res.a.y * k }, b: { x: res.b.x * k, y: res.b.y * k } };
+  state.periodPx = res.periodPx * k;
+  if (autoScale()) setLengthFromTicks(res.ticks);
+  state.rulerSource = `${how}: ${res.ticks} tick intervals, 1 tick = ${(res.periodPx).toFixed(1)} px in the photo`;
+}
+
+// assumes 1 mm ticks (metric) or 1/16 in ticks (inch)
+function setLengthFromTicks(n) {
+  const unit = $('unit').value;
+  const v = unit === 'in' ? n / 16 : unit === 'mm' ? n : n / 10;
+  $('rulerLen').value = +v.toFixed(4);
+}
+
+async function findRulerAuto() {
+  setBusy('📏 Reading the ruler tick marks…');
+  await nextFrame();
+  try {
+    const res = Ruler.detect(gray());
+    if (res) applyRuler(res, 'Found automatically from tick marks');
+    else state.rulerSource = 'ruler not found automatically – drag the red line onto the ruler’s tick marks';
+  } catch (err) {
+    console.error(err);
+  }
+  setBusy('');
+  update();
+}
+
+// after the user moved the ruler: re-read ticks near the new position
+function rulerAfterUserMove(d) {
+  if (!autoScale()) { state.rulerSource = 'set manually'; return; }
+  const k = srcToWork();
+  const toSrc = (p) => ({ x: p.x / k, y: p.y / k });
+  try {
+    if (d.type === 'handle' && state.periodPx) {
+      const other = d.h === state.ruler.a ? state.ruler.b : state.ruler.a;
+      const s = Ruler.snap(gray(), toSrc(d.h), toSrc(other), state.periodPx / k);
+      d.h.x = s.x * k; d.h.y = s.y * k;
+      const n = Math.round(Math.hypot(state.ruler.b.x - state.ruler.a.x, state.ruler.b.y - state.ruler.a.y) / state.periodPx);
+      setLengthFromTicks(n);
+      state.rulerSource = `handle snapped to the nearest tick: ${n} tick intervals`;
+      return;
+    }
+    const res = Ruler.refine(gray(), toSrc(state.ruler.a), toSrc(state.ruler.b), 0.02);
+    if (res) applyRuler(res, 'Ticks read along your line');
+    else state.rulerSource = 'no tick marks found along the line – enter the length manually';
+  } catch (err) { console.error(err); }
 }
 
 /* ------------------------------------------------------------ color math */
@@ -153,10 +225,14 @@ function sensitivity() { return parseFloat($('sensitivity').value) || 1; }
 
 // Object inside a box: background model from a ring around the box,
 // Otsu threshold on color distance, best connected component, holes filled.
+
 function segmentBox() {
   state.lastMethod = 'box';
   const { W, H, lab } = state;
-  const b = normBox(state.box);
+  // an AI box is only approximate: analyse the whole photo and use the box
+  // just to pick the right shape; a box drawn by the user limits the analysis
+  const hint = normBox(state.box);
+  const b = state.boxFromAI ? { x0: 0, y0: 0, x1: W - 1, y1: H - 1 } : hint;
   const x0 = Math.max(0, Math.floor(b.x0)), y0 = Math.max(0, Math.floor(b.y0));
   const x1 = Math.min(W - 1, Math.ceil(b.x1)), y1 = Math.min(H - 1, Math.ceil(b.y1));
   if (x1 - x0 < 4 || y1 - y0 < 4) return;
@@ -186,8 +262,13 @@ function segmentBox() {
     for (let x = x0; x <= x1; x += step) { addSample(x, y0); addSample(x, y1); }
     for (let y = y0; y <= y1; y += step) { addSample(x0, y); addSample(x1, y); }
   }
-  const centers = kmeans(samples, 6, 10);
-
+  // drop rare colors at the border (other objects cut by the image edge)
+  const km = kmeans(samples, 8, 12);
+  const nS = samples.length / 3;
+  const keep = [];
+  for (let j = 0; j < km.counts.length; j++)
+    if (km.counts[j] >= nS * 0.06) keep.push(km.centers[j * 3], km.centers[j * 3 + 1], km.centers[j * 3 + 2]);
+  const centers = keep.length ? keep : Array.from(km.centers);
   // 2. distance of each box pixel to the nearest background cluster
   const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
   const dist = new Float32Array(bw * bh);
@@ -208,18 +289,36 @@ function segmentBox() {
   }
 
   // 3. Otsu threshold
-  let thr = otsu(dist, maxD);
-  thr = Math.max(4, thr) / sensitivity();
+  let thr = Math.max(4, otsu(dist, maxD)) / sensitivity();
   let fg = new Uint8Array(bw * bh);
   for (let i = 0; i < fg.length; i++) fg[i] = dist[i] > thr ? 1 : 0;
 
-  // 4. morphological opening to cut thin bridges (e.g. touching the ruler)
-  fg = dilate(erode(fg, bw, bh, 2), bw, bh, 2);
+  // 4. add strong edges – they close the outline where the object's color
+  //    is similar to the background (e.g. a light part of a book cover)
+  const edges = edgeMap(x0, y0, bw, bh);
+  for (let i = 0; i < fg.length; i++) if (edges[i]) fg[i] = 1;
 
-  // 5. pick the most "obvious" component: large and near the box center
-  const comp = bestComponent(fg, bw, bh);
+  // 5. close small gaps in the outline, fill everything enclosed by it,
+  //    then open to cut thin bridges (background texture, the ruler …)
+  const rc = Math.max(2, Math.round(Math.max(bw, bh) * 0.006));
+  fg = erode(dilate(fg, bw, bh, rc), bw, bh, rc);
+  fillHoles(fg, bw, bh);
+  const ro = Math.max(2, Math.round(Math.max(bw, bh) * 0.008));
+  fg = dilate(erode(fg, bw, bh, ro), bw, bh, ro);
+
+  // 6. pick the most "obvious" component: large and near the box center
+  const local = { x0: hint.x0 - x0, y0: hint.y0 - y0, x1: hint.x1 - x0, y1: hint.y1 - y0 };
+  let comp = bestComponent(fg, bw, bh, state.boxFromAI ? local : null);
   if (!comp) { state.mask.fill(0); update(); return; }
   fillHoles(comp, bw, bh);
+  // edges/closing make the outline a few px too fat: in a thin band along the
+  // border, drop pixels whose color matches the background
+  const inner = erode(comp, bw, bh, 3);
+  for (let i = 0; i < comp.length; i++)
+    if (comp[i] && !inner[i] && dist[i] <= thr) comp[i] = 0;
+  comp = bestComponent(comp, bw, bh, state.boxFromAI ? local : null) || comp;
+  fillHoles(comp, bw, bh);
+  if ($('convex').checked) comp = convexFill(comp, bw, bh);
 
   state.mask.fill(0);
   for (let y = 0; y < bh; y++)
@@ -301,7 +400,61 @@ function kmeans(samples, k, iters) {
       c[j * 3] = sum[j * 3] / cnt[j]; c[j * 3 + 1] = sum[j * 3 + 1] / cnt[j]; c[j * 3 + 2] = sum[j * 3 + 2] / cnt[j];
     }
   }
-  return c;
+  return { centers: c, counts: cnt };
+}
+
+// strong color edges (Sobel on blurred Lab), threshold relative to the box
+function edgeMap(x0, y0, bw, bh) {
+  const { W, H, lab } = state;
+  const g = new Float32Array(bw * bh);
+  let maxG = 0;
+  const at = (x, y, c) => lab[(Math.min(H - 1, Math.max(0, y)) * W + Math.min(W - 1, Math.max(0, x))) * 3 + c];
+  for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+    const X = x + x0, Y = y + y0;
+    let s = 0;
+    for (let c = 0; c < 3; c++) {
+      const w = c === 0 ? 1 : 0.7;
+      const gx = at(X + 1, Y - 1, c) + 2 * at(X + 1, Y, c) + at(X + 1, Y + 1, c) - at(X - 1, Y - 1, c) - 2 * at(X - 1, Y, c) - at(X - 1, Y + 1, c);
+      const gy = at(X - 1, Y + 1, c) + 2 * at(X, Y + 1, c) + at(X + 1, Y + 1, c) - at(X - 1, Y - 1, c) - 2 * at(X, Y - 1, c) - at(X + 1, Y - 1, c);
+      s += w * (gx * gx + gy * gy);
+    }
+    const v = Math.sqrt(s);
+    g[y * bw + x] = v;
+    if (v > maxG) maxG = v;
+  }
+  // threshold: well above typical texture (90th percentile), scaled by sensitivity
+  const sorted = Float32Array.from(g).sort();
+  const p90 = sorted[Math.floor(sorted.length * 0.9)];
+  const thr = Math.max(25, p90 * 1.6) / sensitivity();
+  const e = new Uint8Array(bw * bh);
+  for (let i = 0; i < g.length; i++) e[i] = g[i] > thr ? 1 : 0;
+  return e;
+}
+
+// replace a mask with its convex hull (for books, boxes, cards …)
+function convexFill(m, W, H) {
+  const pts = [];
+  for (let y = 0; y < H; y++) {
+    let l = -1, r = -1;
+    for (let x = 0; x < W; x++) if (m[y * W + x]) { if (l < 0) l = x; r = x; }
+    if (l >= 0) { pts.push([l, y]); if (r !== l) pts.push([r, y]); }
+  }
+  if (pts.length < 3) return m;
+  pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower = [], upper = [];
+  for (const p of pts) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop(); lower.push(p); }
+  for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop(); upper.push(p); }
+  const hull = lower.slice(0, -1).concat(upper.slice(0, -1));
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const x = c.getContext('2d', { willReadFrequently: true });
+  x.fillStyle = '#fff'; x.beginPath();
+  hull.forEach(([px, py], i) => (i ? x.lineTo(px + 0.5, py + 0.5) : x.moveTo(px + 0.5, py + 0.5)));
+  x.closePath(); x.fill();
+  const d = x.getImageData(0, 0, W, H).data;
+  const out = new Uint8Array(W * H);
+  for (let i = 0; i < out.length; i++) out[i] = d[i * 4 + 3] > 127 ? 1 : 0;
+  return out;
 }
 
 function otsu(values, maxV) {
@@ -378,16 +531,33 @@ function labelComponents(m, W, H) {
   return { labels, comps };
 }
 
-function bestComponent(m, W, H) {
+function bestComponent(m, W, H, hint) {
   const { labels, comps } = labelComponents(m, W, H);
   if (!comps.length) return null;
   const diag = Math.hypot(W, H);
   let best = null, bestScore = -1;
-  for (const c of comps) {
-    if (c.size < 20) continue;
-    const d = Math.hypot(c.cx - W / 2, c.cy - H / 2) / diag;
-    const score = c.size * Math.exp(-4 * d * d);
-    if (score > bestScore) { bestScore = score; best = c; }
+  if (hint) {
+    // the shape that best matches the hint box: pixels inside count,
+    // pixels far outside the box count against it
+    const inside = new Float64Array(comps.length + 1), outside = new Float64Array(comps.length + 1);
+    const mx = (hint.x1 - hint.x0) * 0.25, my = (hint.y1 - hint.y0) * 0.25;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const l = labels[y * W + x];
+      if (!l) continue;
+      if (x >= hint.x0 && x <= hint.x1 && y >= hint.y0 && y <= hint.y1) inside[l]++;
+      else if (x < hint.x0 - mx || x > hint.x1 + mx || y < hint.y0 - my || y > hint.y1 + my) outside[l]++;
+    }
+    for (const c of comps) {
+      const score = inside[c.id] - 2 * outside[c.id];
+      if (c.size >= 20 && score > bestScore) { bestScore = score; best = c; }
+    }
+  } else {
+    for (const c of comps) {
+      if (c.size < 20) continue;
+      const d = Math.hypot(c.cx - W / 2, c.cy - H / 2) / diag;
+      const score = c.size * Math.exp(-4 * d * d);
+      if (score > bestScore) { bestScore = score; best = c; }
+    }
   }
   if (!best) return null;
   const out = new Uint8Array(W * H);
@@ -428,6 +598,39 @@ function normBox(b) {
 }
 
 /* ------------------------------------------------------------ rendering */
+
+let busyAnim = 0;
+function setBusy(msg) {
+  state.busy = msg;
+  cancelAnimationFrame(busyAnim);
+  if (msg) {
+    const loop = () => { draw(); busyAnim = requestAnimationFrame(loop); };
+    loop();
+  } else if (state.W) draw();
+}
+
+function drawBusy(ui) {
+  const { W } = state;
+  const hgt = 40 * ui;
+  ctx.fillStyle = 'rgba(0,0,0,.65)';
+  ctx.fillRect(0, 0, W, hgt);
+  const t = performance.now() / 1000;
+  const cx = 22 * ui, cy = hgt / 2, r = 9 * ui;
+  ctx.lineWidth = 3 * ui; ctx.strokeStyle = '#8ab4f8';
+  ctx.beginPath(); ctx.arc(cx, cy, r, t * 6, t * 6 + 4.2); ctx.stroke();
+  ctx.fillStyle = '#fff';
+  let fs = 14;
+  ctx.font = `600 ${fs * ui}px system-ui, sans-serif`;
+  while (fs > 9 && ctx.measureText(state.busy).width > W - 50 * ui) {
+    fs -= 1; ctx.font = `600 ${fs * ui}px system-ui, sans-serif`;
+  }
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(state.busy, 40 * ui, cy);
+  // scanning line effect
+  const y = (Math.sin(t * 2) * 0.5 + 0.5) * state.H;
+  ctx.fillStyle = 'rgba(138,180,248,.35)';
+  ctx.fillRect(0, y - 2 * ui, W, 4 * ui);
+}
 
 function update() {
   // rebuild overlay
@@ -471,9 +674,9 @@ function computeArea() {
   if (unit === 'in') main += ` (${fmt(area)} in²)`;
   if (unit === 'mm' || areaCm2 < 1) main += ` (${fmt(areaCm2 * 100)} mm²)`;
   $('areaValue').textContent = count ? main : '–';
-  $('areaDetail').textContent = count
-    ? `Object: ${count.toLocaleString()} px · Scale: ${(pxPerUnit).toFixed(2)} px/${unit} (in processing image)`
-    : 'No object found – drag a box around it or tap on it.';
+  $('areaDetail').textContent = count ? '' : 'No object found – drag a box around it or tap on it.';
+  $('srcObject').textContent = state.objectSource;
+  $('srcRuler').textContent = `${state.rulerSource} → ${len} ${unit} = ${rulerPx.toFixed(0)} px`;
 }
 
 function fmt(v) {
@@ -497,6 +700,18 @@ function draw() {
     ctx.lineWidth = 2 * ui;
     ctx.strokeStyle = state.mode === 'box' ? '#4fc3f7' : 'rgba(79,195,247,.5)';
     ctx.strokeRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
+    if (state.boxFromAI) {
+      const label = `✨ AI: ${state.objectName || 'object'}`;
+      ctx.setLineDash([]);
+      ctx.font = `600 ${13 * ui}px system-ui, sans-serif`;
+      const tw = ctx.measureText(label).width;
+      const ly = Math.max(b.y0, 20 * ui);
+      ctx.fillStyle = '#4fc3f7';
+      ctx.fillRect(b.x0, ly - 20 * ui, tw + 12 * ui, 20 * ui);
+      ctx.fillStyle = '#002';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, b.x0 + 6 * ui, ly - 10 * ui);
+    }
     ctx.restore();
   }
 
@@ -532,6 +747,7 @@ function draw() {
 
   // magnifier while dragging a ruler handle
   if (state.drag && state.drag.type === 'handle' && state.pointer) drawLoupe(state.pointer, ui);
+  if (state.busy) drawBusy(ui);
 }
 
 function drawLoupe(p, ui) {
@@ -558,7 +774,7 @@ function drawLoupe(p, ui) {
 /* ------------------------------------------------------------ interaction */
 
 const hints = {
-  ruler: 'Drag the two red handles onto two tick marks of the ruler (the magnifier helps), then enter their real distance below.',
+  ruler: 'The red line is placed on the ruler ticks automatically. To fix it: drag the line onto the tick marks (they are re-read), or drag a handle – it snaps to the nearest tick.',
   box: 'Drag a rectangle around the object. Everything outside is ignored.',
   seed: 'Tap on the object. Similar-colored connected area is selected; adjust sensitivity if needed.',
 };
@@ -598,6 +814,7 @@ canvas.addEventListener('pointerdown', (e) => {
     state.box = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
   } else if (state.mode === 'seed') {
     state.seed = p;
+    state.objectSource = 'region grown from the point you tapped';
     segmentSeed();
     state.drag = null;
   }
@@ -629,23 +846,50 @@ const endDrag = () => {
   if (!state.drag) return;
   const d = state.drag;
   state.drag = null;
-  if (d.type === 'box') segmentBox();
-  else update();
+  if (d.type === 'box') {
+    state.boxFromAI = false;
+    state.objectSource = 'your box + image analysis';
+    segmentBox();
+  } else {
+    rulerAfterUserMove(d);
+    update();
+  }
 };
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
 
-$('rulerLen').addEventListener('input', () => { computeArea(); draw(); });
-$('unit').addEventListener('change', () => { computeArea(); draw(); });
+$('rulerLen').addEventListener('input', () => {
+  $('autoScale').checked = false;
+  state.rulerSource = 'length entered manually';
+  computeArea(); draw();
+});
+$('unit').addEventListener('change', () => {
+  if (autoScale() && state.periodPx) {
+    const n = Math.round(Math.hypot(state.ruler.b.x - state.ruler.a.x, state.ruler.b.y - state.ruler.a.y) / state.periodPx);
+    setLengthFromTicks(n);
+  }
+  computeArea(); draw();
+});
+$('autoScale').addEventListener('change', () => {
+  if (autoScale() && state.W) { rulerAfterUserMove({ type: 'line' }); update(); }
+});
+$('rulerBtn').addEventListener('click', async () => {
+  if (!state.W) return;
+  $('autoScale').checked = true;
+  await findRulerAuto();
+});
 let sensTimer;
 $('sensitivity').addEventListener('input', () => {
   clearTimeout(sensTimer);
   sensTimer = setTimeout(() => (state.lastMethod === 'seed' && state.seed ? segmentSeed() : segmentBox()), 120);
 });
+$('convex').addEventListener('change', () => (state.lastMethod === 'seed' && state.seed ? segmentSeed() : segmentBox()));
 $('autoBtn').addEventListener('click', () => {
   const m = 0.04, { W, H } = state;
   state.box = { x0: W * m, y0: H * m, x1: W * (1 - m), y1: H * (1 - m) };
   state.objectName = '';
+  state.boxFromAI = false;
+  state.objectSource = 'image analysis (whole photo)';
   segmentBox();
 });
 window.addEventListener('resize', () => state.W && draw());
@@ -691,6 +935,7 @@ async function getSession() {
     monitor(m) {
       m.addEventListener('downloadprogress', (e) => {
         $('aiResult').textContent = `Downloading AI model… ${Math.round(e.loaded * 100)}%`;
+        if (state.busy) state.busy = `✨ Downloading Chrome AI model… ${Math.round(e.loaded * 100)}%`;
       });
     },
   });
@@ -736,6 +981,7 @@ async function runAI() {
   const btn = $('aiBtn'), out = $('aiResult');
   btn.disabled = true;
   out.textContent = '✨ Asking Chrome AI to find the ruler and the object…';
+  setBusy('✨ AI is finding the object and ruler…');
   try {
     const session = await getSession();
     const s = await session.clone();
@@ -753,6 +999,8 @@ async function runAI() {
     out.textContent = `Chrome AI failed (${err && err.message ? err.message : err}). Using built-in image analysis – adjust manually if needed.`;
   } finally {
     btn.disabled = false;
+    setBusy('');
+    update();
   }
 }
 
@@ -762,24 +1010,43 @@ function applyAI(r) {
   const sy = (v) => Math.max(0, Math.min(H - 1, (v / 1000) * H));
   const msgs = [];
 
+  state.objectName = (r.object_name || '').slice(0, 40);
   const b = r.object_box;
   if (b && b.x_max > b.x_min && b.y_max > b.y_min) {
-    // pad the AI box a bit – its coordinates are approximate
-    const pw = (b.x_max - b.x_min) * 0.08 + 10, ph = (b.y_max - b.y_min) * 0.08 + 10;
+    // the AI box is approximate – it is only used to pick the right shape
+    const pw = (b.x_max - b.x_min) * 0.04, ph = (b.y_max - b.y_min) * 0.04;
     state.box = { x0: sx(b.x_min - pw), y0: sy(b.y_min - ph), x1: sx(b.x_max + pw), y1: sy(b.y_max + ph) };
+    state.boxFromAI = true;
+    state.objectSource = `✨ AI found “${state.objectName || 'object'}” (blue box), outline traced by image analysis`;
+    msgs.push(`Object: “${state.objectName || 'unknown'}” – shown with the blue box.`);
+  } else {
+    msgs.push('AI did not return an object box – using image analysis of the whole photo.');
   }
-  state.objectName = (r.object_name || '').slice(0, 40);
-  msgs.push(`Object: ${state.objectName || 'unknown'}.`);
 
   const dv = Math.abs((r.ruler_value_2 ?? 0) - (r.ruler_value_1 ?? 0));
   const p1 = r.ruler_point_1, p2 = r.ruler_point_2;
-  if (r.ruler_found && p1 && p2 && dv > 0 && Math.hypot(p2.x - p1.x, p2.y - p1.y) > 30) {
-    state.ruler = { a: { x: sx(p1.x), y: sy(p1.y) }, b: { x: sx(p2.x), y: sy(p2.y) } };
-    $('rulerLen').value = +dv.toFixed(3);
-    $('unit').value = ['cm', 'mm', 'in'].includes(r.ruler_unit) ? r.ruler_unit : 'cm';
-    msgs.push(`Ruler: marks ${r.ruler_value_1} → ${r.ruler_value_2} ${$('unit').value}. Please check the red handles sit exactly on those marks.`);
+  const aiRuler = r.ruler_found && p1 && p2 && dv > 0 && Math.hypot(p2.x - p1.x, p2.y - p1.y) > 30;
+  if (state.periodPx) {
+    msgs.push('Ruler: tick marks were already measured automatically.');
+  } else if (aiRuler) {
+    const unit = ['cm', 'mm', 'in'].includes(r.ruler_unit) ? r.ruler_unit : 'cm';
+    $('unit').value = unit === 'mm' ? 'cm' : unit;
+    const k = srcToWork();
+    const A = { x: sx(p1.x) / k, y: sy(p1.y) / k }, B = { x: sx(p2.x) / k, y: sy(p2.y) / k };
+    let res = null;
+    try { if (autoScale()) res = Ruler.refine(gray(), A, B, 0.06); } catch (err) { console.error(err); }
+    if (res) {
+      applyRuler(res, '✨ AI located the ruler, tick marks measured');
+      msgs.push('Ruler: located by AI, scale measured from the tick marks.');
+    } else {
+      state.ruler = { a: { x: sx(p1.x), y: sy(p1.y) }, b: { x: sx(p2.x), y: sy(p2.y) } };
+      const len = unit === 'mm' ? dv / 10 : dv;
+      $('rulerLen').value = +len.toFixed(3);
+      state.rulerSource = `✨ AI estimate: marks ${r.ruler_value_1} → ${r.ruler_value_2} ${unit} – check the handles!`;
+      msgs.push(`Ruler: AI read the marks ${r.ruler_value_1} → ${r.ruler_value_2} ${unit}. Please check the red handles sit exactly on those marks.`);
+    }
   } else {
-    msgs.push('Ruler not reliably found – please place the red handles manually.');
+    msgs.push('Ruler not found by AI – place the red handles manually.');
   }
   $('aiResult').textContent = '✨ ' + msgs.join(' ');
   segmentBox();
