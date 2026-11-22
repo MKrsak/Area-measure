@@ -52,6 +52,13 @@ async function onFile(e) {
   } catch {
     bmp = await loadViaImg(file);
   }
+  await processPhoto(bmp, null);
+}
+
+// shared by the file inputs and the level camera (camera.js)
+// tilt: degrees off level when the photo was taken (level camera), else null
+async function processPhoto(bmp, tilt) {
+  state.captureTilt = tilt;
   loadImage(bmp);
   await findRulerAuto();
   if (ai.status === 'available') await runAI();
@@ -978,6 +985,9 @@ function computeArea() {
   $('areaValue').textContent = count ? main : '–';
   $('areaDetail').textContent = count ? '' : 'No object found – drag a box around it or tap on it.';
   $('srcObject').textContent = state.objectSource;
+  const t = state.captureTilt;
+  $('srcPhotoRow').hidden = t == null;
+  if (t != null) $('srcPhoto').textContent = `taken with the level camera, ${t.toFixed(1)}° off level` + (t > 2 ? ' – tilted, the result may be less accurate' : '');
   $('srcRuler').textContent = `${state.rulerSource} → ${len} ${unit} = ${rulerPx.toFixed(0)} px${tiltNote}`;
 }
 

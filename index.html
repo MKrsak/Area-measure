@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Area Measure</title>
   <meta name="description" content="Take a photo of an object next to a ruler and measure its area.">
-  <link rel="stylesheet" href="style.css?v=9">
+  <link rel="stylesheet" href="style.css?v=10">
 </head>
 <body>
   <header>
@@ -16,8 +16,9 @@
   <main>
     <section class="card" id="inputCard">
       <div class="row">
-        <label class="btn primary">
-          📷 Take photo
+        <button class="btn primary" id="levelCamBtn">📐 Level camera</button>
+        <label class="btn">
+          📷 Phone camera
           <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden>
         </label>
         <label class="btn">
@@ -36,6 +37,7 @@
         <dl class="sources">
           <dt>Object</dt><dd id="srcObject"></dd>
           <dt>Scale</dt><dd id="srcRuler"></dd>
+          <div id="srcPhotoRow" class="srcrow" hidden><dt>Photo</dt><dd id="srcPhoto"></dd></div>
         </dl>
       </div>
 
@@ -80,7 +82,7 @@
       <h2>How to take a good photo</h2>
       <ol>
         <li><b>Ruler at the same height as the measured surface.</b> Flat things (paper, leaf): ruler right next to them. Thick things (box, book): lay the ruler <b>on top</b> of the object – the app ignores the ruler there. Each cm of height difference costs about 2–4 % of area.</li>
-        <li><b>Phone parallel to the surface</b>, straight above the middle of the object – not tilted. The app corrects some tilt along the ruler, but not across it.</li>
+        <li><b>Phone parallel to the surface</b>, straight above the middle of the object – use <b>📐 Level camera</b>: it shows a spirit level and takes the photo by itself once the phone is flat (within 1°).</li>
         <li><b>Step back and zoom 2×</b> rather than getting close: less perspective, the sides of a box stay out of view. Object and ruler should still fill most of the picture.</li>
         <li><b>Ruler flat and straight</b>, close to the object, at least 10 cm of it visible, mm marks sharp. Do not hold up the end of a tape – weigh it down.</li>
         <li><b>Plain background with a different color</b> than the object, soft even light, no flash.</li>
@@ -94,8 +96,27 @@
     </section>
   </main>
 
-  <p class="version">Version 9</p>
-  <script src="ruler.js?v=9"></script>
-  <script src="app.js?v=9"></script>
+  <div id="camOverlay" class="cam hidden" role="dialog" aria-label="Level camera">
+    <video id="camVideo" playsinline muted autoplay></video>
+    <div class="camLevel" aria-hidden="true">
+      <div class="ring r1"></div><div class="ring r2"></div>
+      <div class="cross"></div>
+      <div id="camBubble" class="bubble"></div>
+    </div>
+    <div class="camTop">
+      <div id="camAngle" class="camAngle">Hold the phone flat above the object</div>
+      <div id="camHint" class="camHint"></div>
+    </div>
+    <div class="camBar">
+      <button id="camClose" class="camBtn" aria-label="Close">✕</button>
+      <button id="camShutter" class="shutter" aria-label="Take photo"><span id="camProgress"></span></button>
+      <button id="camZoom" class="camBtn" hidden>2×</button>
+    </div>
+  </div>
+
+  <p class="version">Version 10</p>
+  <script src="ruler.js?v=10"></script>
+  <script src="camera.js?v=10"></script>
+  <script src="app.js?v=10"></script>
 </body>
 </html>
