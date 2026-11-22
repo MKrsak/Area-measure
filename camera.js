@@ -12,22 +12,44 @@ const LevelCam = (() => {
   const el = (id) => document.getElementById(id);
 
   let stream = null, track = null, tilt = null, okSince = 0, busy = false, sensorSeen = false, anim = 0, zoomed = false;
+  let lastOrient = 0, noSensor = false;
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isIOSNonSafari = isIOS && /CriOS|FxiOS|EdgiOS|OPiOS|GSA\//.test(navigator.userAgent);
+  const OK_HINT = 'The photo is taken automatically when the bubble is in the green circle.';
 
   // angle between the camera axis and straight down, from beta/gamma
   function onOrient(e) {
     if (e.beta == null || e.gamma == null) return;
-    if (!sensorSeen) el('camHint').textContent = 'The photo is taken automatically when the bubble is in the green circle.';
-    sensorSeen = true;
+    if (!sensorSeen) el('camHint').textContent = OK_HINT;
+    sensorSeen = true; lastOrient = performance.now();
     const b = e.beta * Math.PI / 180, g = e.gamma * Math.PI / 180;
     const total = Math.acos(Math.min(1, Math.abs(Math.cos(b) * Math.cos(g)))) * 180 / Math.PI;
     tilt = { total, beta: e.beta, gamma: e.gamma, faceDown: Math.abs(e.beta) > 90 };
+  }
+
+  // second source: the gravity vector from the motion sensor
+  function onMotion(e) {
+    const g = e.accelerationIncludingGravity;
+    if (!g || g.x == null || g.z == null) return;
+    if (performance.now() - lastOrient < 500) return;     // orientation events preferred
+    const n = Math.hypot(g.x, g.y, g.z);
+    if (n < 5) return;                                       // moving too much
+    if (!sensorSeen) el('camHint').textContent = OK_HINT;
+    sensorSeen = true;
+    const total = Math.acos(Math.min(1, Math.abs(g.z) / n)) * 180 / Math.PI;
+    // equivalent beta/gamma for the bubble (signs differ between platforms – the
+    // bubble follows the higher side like the orientation-based one)
+    const s = isIOS ? -1 : 1;
+    const beta = Math.asin(Math.max(-1, Math.min(1, s * g.y / n))) * 180 / Math.PI;
+    const gamma = Math.asin(Math.max(-1, Math.min(1, -s * g.x / n))) * 180 / Math.PI;
+    tilt = { total, beta, gamma, faceDown: false };          // the sign of z differs between platforms
   }
 
   function frame() {
     anim = requestAnimationFrame(frame);
     const bubble = el('camBubble'), shutter = el('camShutter'), angle = el('camAngle'), prog = el('camProgress');
     if (!tilt) {
-      angle.textContent = sensorSeen ? '…' : 'Hold the phone flat above the object';
+      if (!noSensor) angle.textContent = sensorSeen ? '…' : 'Hold the phone flat above the object';
       return;
     }
     if (tilt.faceDown) {
@@ -88,16 +110,19 @@ const LevelCam = (() => {
     el('camZoom').hidden = !(caps.zoom && caps.zoom.max >= 2);
     el('camZoom').classList.remove('on');
 
-    tilt = null; okSince = 0; busy = false; sensorSeen = false;
-    el('camHint').textContent = perm === 'denied'
-      ? 'Motion sensor not allowed – take the photo by hand, as flat as you can.'
-      : 'The photo is taken automatically when the bubble is in the green circle.';
+    tilt = null; okSince = 0; busy = false; sensorSeen = false; lastOrient = 0; noSensor = false;
+    el('camHint').textContent = OK_HINT;
     window.addEventListener('deviceorientation', onOrient);
+    window.addEventListener('devicemotion', onMotion);
     setTimeout(() => {
-      if (!sensorSeen && stream) {
-        el('camHint').textContent = 'No tilt sensor found on this device – take the photo by hand, as flat as you can.';
-        el('camAngle').textContent = 'Level unknown';
-      }
+      if (sensorSeen || !stream) return;
+      noSensor = true;
+      el('camAngle').textContent = 'Level unknown';
+      el('camHint').textContent = isIOSNonSafari
+        ? 'This browser does not give web pages access to the tilt sensor on iPhone. Open the page in Safari to use the level – or take the photo by hand, as flat as you can.'
+        : perm === 'denied'
+          ? 'Motion access was not allowed. Close this tab, open the page again and tap “Allow” when asked – or take the photo by hand, as flat as you can.'
+          : 'No tilt sensor available – take the photo by hand, as flat as you can.';
     }, 1500);
     cancelAnimationFrame(anim);
     frame();
@@ -106,6 +131,7 @@ const LevelCam = (() => {
   function close() {
     cancelAnimationFrame(anim);
     window.removeEventListener('deviceorientation', onOrient);
+    window.removeEventListener('devicemotion', onMotion);
     if (stream) stream.getTracks().forEach((t) => t.stop());
     stream = null; track = null;
     el('camVideo').srcObject = null;

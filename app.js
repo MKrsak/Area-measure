@@ -379,6 +379,18 @@ function segmentBox(shadowMode = 2) {
 
   // 3. Otsu threshold
   let thr = Math.max(4, otsu(dist, maxD)) / sensitivity();
+  // two levels: clear object colors start the object, weaker differences
+  // (pale rim of a box, light parts of the print) join when connected to it
+  const bgD = [];
+  for (let i = 0; i < samples.length; i += 3) {
+    let best = Infinity;
+    for (let c = 0; c < centers.length; c += 3)
+      best = Math.min(best, (samples[i] - centers[c]) ** 2 + (samples[i + 1] - centers[c + 1]) ** 2 + (samples[i + 2] - centers[c + 2]) ** 2);
+    bgD.push(Math.sqrt(best));
+  }
+  bgD.sort((a, b) => a - b);
+  const bgP97 = bgD[Math.floor(bgD.length * 0.97)] || 0;
+  const thrLow = Math.min(thr, Math.max(4, bgP97 * 1.3, thr * 0.4) / sensitivity());
   let fg = new Uint8Array(bw * bh);
   for (let i = 0; i < fg.length; i++) fg[i] = dist[i] > thr ? 1 : 0;
 
@@ -387,6 +399,18 @@ function segmentBox(shadowMode = 2) {
   //     and textured (relief of the cloth, glare on a rough surface)
   const bgVar = shadowMode ? backgroundVariation(fsamples, x0, y0, bw, bh, shadowMode) : new Uint8Array(bw * bh);
   for (let i = 0; i < fg.length; i++) if (fg[i] && bgVar[i]) fg[i] = 0;
+  {
+    const stack = new Int32Array(bw * bh);
+    let sp = 0;
+    for (let i = 0; i < fg.length; i++) if (fg[i]) stack[sp++] = i;
+    while (sp) {
+      const i = stack[--sp], x = i % bw, y = (i / bw) | 0;
+      for (const j of [x > 0 ? i - 1 : -1, x < bw - 1 ? i + 1 : -1, y > 0 ? i - bw : -1, y < bh - 1 ? i + bw : -1]) {
+        if (j < 0 || fg[j] || bgVar[j] || dist[j] <= thrLow) continue;
+        fg[j] = 1; stack[sp++] = j;
+      }
+    }
+  }
 
   // 4. add strong edges – they close the outline where the object's color
   //    is similar to the background (e.g. a light part of a book cover)
@@ -492,7 +516,7 @@ function rulerMask() {
     v.sort((p, q) => p - q);
     ext[side] = v[v.length >> 1] || 0;
   }
-  const pad = 2 + 1.5 * mm;               // plus the shadow / gap right next to it
+  const pad = 2 + 3 * mm;                 // plus the shadow / gap next to it, and a bent tape
   const o0 = -ext[-1] - pad, o1 = ext[1] + pad;
   // extend along the ruler while a cross-section still looks like the ruler
   const along = (dir) => {
@@ -518,18 +542,28 @@ function rulerMask() {
 // The ruler may lie ON the object (best for thick objects): where the object
 // continues on both sides of the ruler strip, the strip belongs to the object.
 function fillUnderRuler(comp, rm, x0, y0, bw, bh) {
-  const { W } = state, g = rm.geom, gap = 4;
+  const { W, H } = state, g = rm.geom, gap = 4;
+  const inRm = (X, Y) => {
+    const x = Math.round(X), y = Math.round(Y);
+    return x >= 0 && y >= 0 && x < W && y < H && rm[y * W + x] === 1;
+  };
   const inC = (X, Y) => {
     const x = Math.round(X) - x0, y = Math.round(Y) - y0;
     return x >= 0 && y >= 0 && x < bw && y < bh && comp[y * bw + x] === 1;
+  };
+  // from a strip pixel, walk across to the local edge of the strip, look just beyond
+  const side = (X, Y, sx, sy) => {
+    let k = 0;
+    const maxK = (g.o1 - g.o0) + 2;
+    while (k < maxK && inRm(X + sx * k, Y + sy * k)) k++;
+    for (let j = 1; j <= gap; j++) if (inC(X + sx * (k + j), Y + sy * (k + j))) return true;
+    return false;
   };
   const add = [];
   for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
     if (!rm[(y + y0) * W + x + x0] || comp[y * bw + x]) continue;
     const X = x + x0, Y = y + y0;
-    const o = (X - g.a.x) * g.n.x + (Y - g.a.y) * g.n.y;          // offset across the strip
-    const up = g.o1 - o + gap, dn = o - g.o0 + gap;
-    if (inC(X + g.n.x * up, Y + g.n.y * up) && inC(X - g.n.x * dn, Y - g.n.y * dn)) add.push(y * bw + x);
+    if (side(X, Y, g.n.x, g.n.y) && side(X, Y, -g.n.x, -g.n.y)) add.push(y * bw + x);
   }
   for (const i of add) comp[i] = 1;
 }
