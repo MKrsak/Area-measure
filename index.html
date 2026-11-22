@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Area Measure</title>
+  <meta name="description" content="Take a photo of an object next to a ruler and measure its area.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Area Measure</h1>
+    <p class="sub">Photograph an object lying next to a ruler. The app finds the object and calculates its area from the ruler scale.</p>
+  </header>
+
+  <main>
+    <section class="card" id="inputCard">
+      <div class="row">
+        <label class="btn primary">
+          📷 Take photo
+          <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden>
+        </label>
+        <label class="btn">
+          🖼️ Choose image
+          <input id="fileInput" type="file" accept="image/*" hidden>
+        </label>
+      </div>
+      <p id="aiStatus" class="status">Checking for Chrome built-in AI…</p>
+    </section>
+
+    <section class="card hidden" id="workCard">
+      <div class="result" id="result">
+        <div class="area" id="areaValue">–</div>
+        <div class="detail" id="areaDetail"></div>
+      </div>
+
+      <div class="canvasWrap">
+        <canvas id="canvas"></canvas>
+      </div>
+
+      <div class="modes" role="tablist">
+        <button class="mode active" data-mode="ruler">📏 Ruler</button>
+        <button class="mode" data-mode="box">⬚ Box object</button>
+        <button class="mode" data-mode="seed">👆 Tap object</button>
+      </div>
+      <p class="hint" id="modeHint"></p>
+
+      <div class="controls">
+        <label>Ruler length between handles
+          <span class="inline">
+            <input id="rulerLen" type="number" min="0.01" step="any" value="10">
+            <select id="unit">
+              <option value="cm" selected>cm</option>
+              <option value="mm">mm</option>
+              <option value="in">in</option>
+            </select>
+          </span>
+        </label>
+        <label>Detection sensitivity
+          <input id="sensitivity" type="range" min="0.4" max="1.8" step="0.05" value="1">
+        </label>
+      </div>
+
+      <div class="row">
+        <button class="btn primary" id="aiBtn" disabled>✨ Detect with Chrome AI</button>
+        <button class="btn" id="autoBtn">🔍 Auto-detect object</button>
+      </div>
+      <p id="aiResult" class="status"></p>
+    </section>
+
+    <section class="card tips">
+      <h2>Tips for accurate results</h2>
+      <ul>
+        <li>Shoot straight from above, with the ruler lying flat in the <b>same plane</b> as the object.</li>
+        <li>Use a plain, contrasting background and even lighting (avoid strong shadows).</li>
+        <li>Always check the ruler handles – zoom in with the magnifier and place them exactly on two tick marks, then type their distance.</li>
+        <li>If the outline is wrong, drag a box around the object or tap on it, and adjust the sensitivity.</li>
+      </ul>
+      <p class="small">Chrome AI uses Gemini Nano running locally in Chrome (Prompt API with image input). Your photo never leaves your device. If it is not available, everything still works with the built-in image analysis and manual adjustment.</p>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
