@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Area Measure</title>
   <meta name="description" content="Take a photo of an object next to a ruler and measure its area.">
-  <link rel="stylesheet" href="style.css?v=12">
+  <link rel="stylesheet" href="style.css?v=13">
 </head>
 <body>
   <header>
@@ -41,14 +41,42 @@
         </dl>
       </div>
 
-      <div class="canvasWrap">
+      <div class="stage" id="stage">
         <canvas id="canvas"></canvas>
+        <div class="ov ovTL"><span id="areaBadge" class="badge">–</span></div>
+        <div class="ov ovTR">
+          <button class="ib" id="zoomIn" aria-label="Zoom in">＋</button>
+          <button class="ib" id="zoomOut" aria-label="Zoom out">－</button>
+          <button class="ib" id="zoomFit" aria-label="Show whole photo">⤢</button>
+        </div>
+        <div class="ov ovBL">
+          <div class="pill">
+            <button class="ib" id="shrinkBtn" aria-label="Shrink outline">－</button>
+            <span class="pillLabel">Outline</span>
+            <button class="ib" id="growBtn" aria-label="Grow outline">＋</button>
+          </div>
+        </div>
+        <div class="ov ovBR">
+          <button class="ib" id="undoBtn" aria-label="Undo" disabled>↶</button>
+        </div>
       </div>
 
       <div class="modes" role="tablist">
-        <button class="mode active" data-mode="ruler">📏 Ruler</button>
-        <button class="mode" data-mode="box">⬚ Box object</button>
-        <button class="mode" data-mode="seed">👆 Tap object</button>
+        <button class="mode active" data-mode="move"><span>✋</span>Move</button>
+        <button class="mode" data-mode="fix"><span>✏️</span>Fix outline</button>
+        <button class="mode" data-mode="box"><span>⬚</span>Box</button>
+        <button class="mode" data-mode="seed"><span>👆</span>Tap</button>
+      </div>
+      <div class="brushBar" id="brushBar" hidden>
+        <div class="seg">
+          <button class="segBtn on" id="brushErase">🧽 Erase</button>
+          <button class="segBtn" id="brushAdd">🖌️ Add</button>
+        </div>
+        <div class="stepper">
+          <button class="ib" id="brushSmaller" aria-label="Smaller brush">－</button>
+          <span class="stepVal">Brush <b id="brushSizeVal">M</b></span>
+          <button class="ib" id="brushBigger" aria-label="Bigger brush">＋</button>
+        </div>
       </div>
       <p class="hint" id="modeHint"></p>
 
@@ -64,9 +92,14 @@
             </select>
           </span>
         </label>
-        <label>Detection sensitivity
-          <input id="sensitivity" type="range" min="0.4" max="1.8" step="0.05" value="1">
-        </label>
+        <div class="field">Detection sensitivity <span class="small">(detects the outline again – ↶ brings back your edits)</span>
+          <div class="stepper">
+            <button class="ib" id="sensDown" aria-label="Less sensitive">－</button>
+            <span class="stepVal" id="sensVal">1.0</span>
+            <button class="ib" id="sensUp" aria-label="More sensitive">＋</button>
+          </div>
+          <input id="sensitivity" type="hidden" value="1">
+        </div>
         <label class="check"><input id="rectFit" type="checkbox" checked> Straighten rectangular objects (box, book, paper) to exact edges</label>
         <label class="check"><input id="convex" type="checkbox"> Object has a convex shape (book, box, card, plate…) – fill the outline</label>
       </div>
@@ -88,10 +121,14 @@
         <li><b>Ruler flat and straight</b>, at least 10 cm of it visible, mm marks sharp. On a thick object, let it lie <b>completely on the object</b> – not hanging over the edge. Do not hold a tape – weigh it down.</li>
         <li><b>Plain background with a different color</b> than the object, soft even light, no flash, no glare on glossy wrapping.</li>
       </ol>
-      <h2>Checking the result</h2>
+      <h2>Checking and fixing the result</h2>
       <ul>
-        <li>The red handles should sit on two tick marks. If not, drag the red line roughly onto the ruler (it zooms in and reads the ticks), drag a handle (it snaps to the nearest tick), or type the length.</li>
-        <li>If the green outline is wrong, drag a box around the object or tap on it, and adjust the sensitivity.</li>
+        <li><b>Zoom</b> with two fingers (or the ＋/－ buttons on the photo), drag to move around. ⤢ shows the whole photo again.</li>
+        <li><b>Outline －/＋</b> on the photo shrinks or grows the selected area by one step – e.g. to drop a thin shadow edge.</li>
+        <li><b>✏️ Fix outline</b>: paint with a finger to <b>erase</b> parts (a shadow on one side) or <b>add</b> missing parts. Choose the brush size; zoom in for precision.</li>
+        <li><b>↶</b> undoes the last change – every edit can be undone.</li>
+        <li>The red handles should sit on two tick marks. In ✋ Move mode grab a handle (it snaps to the nearest tick) or the red line (the ticks are read again there), or type the length.</li>
+        <li>If the object is not found at all, use ⬚ Box (drag around it) or 👆 Tap (tap on it).</li>
       </ul>
       <p class="small">Chrome AI (Gemini Nano, desktop Chrome only) runs locally – your photo never leaves your device. Everything else works on any device without it.</p>
     </section>
@@ -115,9 +152,9 @@
     </div>
   </div>
 
-  <p class="version">Version 12</p>
-  <script src="ruler.js?v=12"></script>
-  <script src="camera.js?v=12"></script>
-  <script src="app.js?v=12"></script>
+  <p class="version">Version 13</p>
+  <script src="ruler.js?v=13"></script>
+  <script src="camera.js?v=13"></script>
+  <script src="app.js?v=13"></script>
 </body>
 </html>

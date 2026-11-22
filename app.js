@@ -103,7 +103,9 @@ function loadImage(src) {
   canvas.width = W; canvas.height = H;
   $('workCard').classList.remove('hidden');
   $('aiResult').textContent = '';
-  setMode('ruler');
+  view.s = 1; view.ox = view.oy = 0;
+  clearUndo();
+  setMode('move');
   segmentBox();
 }
 
@@ -1228,6 +1230,7 @@ function computeArea() {
   if (unit === 'in') main += ` (${fmt(area)} in²)`;
   if (unit === 'mm' || areaCm2 < 1) main += ` (${fmt(areaCm2 * 100)} mm²)`;
   $('areaValue').textContent = count ? main : '–';
+  $('areaBadge').textContent = count ? `${fmt(areaCm2)} cm²` : '–';
   $('areaDetail').textContent = count ? '' : 'No object found – drag a box around it or tap on it.';
   $('srcObject').textContent = state.objectSource;
   const t = state.captureTilt;
@@ -1242,12 +1245,40 @@ function fmt(v) {
   return v.toFixed(2);
 }
 
+// view (zoom / pan): work-image point (x, y) is drawn at ((x - ox) * s, (y - oy) * s)
+const view = { s: 1, ox: 0, oy: 0 };
+const cssPx = () => state.W / (canvas.getBoundingClientRect().width || state.W);   // canvas px per CSS px
+
+function clampView() {
+  view.s = Math.max(1, Math.min(10, view.s));
+  view.ox = Math.max(0, Math.min(state.W - state.W / view.s, view.ox));
+  view.oy = Math.max(0, Math.min(state.H - state.H / view.s, view.oy));
+}
+
+function zoomAt(factor, cx, cy) {          // cx, cy: canvas px that stays in place
+  const wx = view.ox + cx / view.s, wy = view.oy + cy / view.s;
+  view.s *= factor;
+  clampView();
+  view.ox = wx - cx / view.s; view.oy = wy - cy / view.s;
+  clampView();
+  draw();
+}
+
 function draw() {
   const { W, H, ruler } = state;
-  const ui = W / canvas.getBoundingClientRect().width || 1; // work px per CSS px
+  const css = cssPx(), { s: vs, ox, oy } = view;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, W, H);
-  ctx.drawImage(state.workCanvas, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  if (vs > 1.01) {                         // zoomed: draw from the full-resolution photo
+    const k = srcToWork();
+    ctx.drawImage(state.src, ox / k, oy / k, W / vs / k, H / vs / k, 0, 0, W, H);
+  } else ctx.drawImage(state.workCanvas, 0, 0);
+  ctx.setTransform(vs, 0, 0, vs, -ox * vs, -oy * vs);
+  const ui = css / vs;                     // work px per CSS px
+  ctx.imageSmoothingEnabled = vs < 2;
   ctx.drawImage(state.maskCanvas, 0, 0);
+  ctx.imageSmoothingEnabled = true;
 
   // box
   if (state.box && (state.mode === 'box' || state.lastMethod === 'box')) {
@@ -1280,14 +1311,28 @@ function draw() {
     ctx.lineWidth = 2 * ui; ctx.strokeStyle = '#fff'; ctx.stroke();
   }
 
+  // brush stroke in progress
+  const g = gesture;
+  if (g && g.type === 'brush' && g.pts.length) {
+    ctx.save();
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.lineWidth = g.r * 2;
+    ctx.strokeStyle = brush.erase ? 'rgba(255,60,60,.55)' : 'rgba(60,200,120,.6)';
+    ctx.beginPath();
+    g.pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    if (g.pts.length === 1) ctx.lineTo(g.pts[0].x + 0.01, g.pts[0].y);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   // ruler
   ctx.save();
   ctx.lineWidth = 3 * ui;
   ctx.strokeStyle = '#ff5252';
   ctx.beginPath(); ctx.moveTo(ruler.a.x, ruler.a.y); ctx.lineTo(ruler.b.x, ruler.b.y); ctx.stroke();
   for (const p of [ruler.a, ruler.b]) {
-    ctx.beginPath(); ctx.arc(p.x, p.y, 10 * ui, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(255,82,82,.25)'; ctx.fill();
+    ctx.beginPath(); ctx.arc(p.x, p.y, 13 * ui, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,82,82,.22)'; ctx.fill();
     ctx.lineWidth = 2 * ui; ctx.stroke();
     ctx.beginPath(); ctx.arc(p.x, p.y, 1.5 * ui, 0, Math.PI * 2);
     ctx.fillStyle = '#ff5252'; ctx.fill();
@@ -1302,41 +1347,44 @@ function draw() {
   ctx.fillText(label, mx, my);
   ctx.restore();
 
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   // magnifier while dragging a ruler handle
-  if (state.drag && state.drag.type === 'handle' && state.pointer) drawLoupe(state.pointer, ui);
-  if (state.busy) drawBusy(ui);
+  if (g && g.type === 'handle') drawLoupe(g.h, css);
+  if (state.busy) drawBusy(css);
 }
 
-function drawLoupe(p, ui) {
+// p: work coords; drawn in canvas (screen) coords
+function drawLoupe(p, css) {
   const { W } = state;
-  const R = 70 * ui;
-  // show about ±12 mm around the handle (if the scale is known), from the full-resolution photo
-  const zoom = state.periodPx ? Math.max(3, Math.min(14, R / (state.periodPx * 12))) : 5;
-  const cx = p.x < W / 2 ? W - R - 10 * ui : R + 10 * ui;
-  const cy = R + 10 * ui;
+  const R = 70 * css;
+  // about ±8 mm around the handle (if the scale is known), from the full-resolution photo
+  const zoomW = state.periodPx ? Math.max(3, Math.min(30, R / (state.periodPx * 8))) : 5;  // canvas px per work px
+  const ps = (p.x - view.ox) * view.s;
+  const cx = ps < W / 2 ? W - R - 10 * css : R + 10 * css;
+  const cy = R + 10 * css;
+  const k = srcToWork(), sr = R / zoomW;              // work px shown around p
   ctx.save();
   ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.clip();
   ctx.fillStyle = '#000'; ctx.fillRect(cx - R, cy - R, 2 * R, 2 * R);
-  const sr = R / zoom;
-  const k = srcToWork();
   ctx.imageSmoothingEnabled = true;
   ctx.drawImage(state.src, (p.x - sr) / k, (p.y - sr) / k, 2 * sr / k, 2 * sr / k, cx - R, cy - R, 2 * R, 2 * R);
-  ctx.strokeStyle = '#ff5252'; ctx.lineWidth = 1.5 * ui;
+  ctx.strokeStyle = '#ff5252'; ctx.lineWidth = 1.5 * css;
   ctx.beginPath();
   ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy);
   ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R);
   ctx.stroke();
   ctx.restore();
   ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2);
-  ctx.lineWidth = 3 * ui; ctx.strokeStyle = '#fff'; ctx.stroke();
+  ctx.lineWidth = 3 * css; ctx.strokeStyle = '#fff'; ctx.stroke();
 }
 
 /* ------------------------------------------------------------ interaction */
 
 const hints = {
-  ruler: 'The red line is placed on the ruler ticks automatically. To fix it: drag the line onto the tick marks (they are re-read), or drag a handle – it snaps to the nearest tick.',
-  box: 'Drag a rectangle around the object. Everything outside is ignored.',
-  seed: 'Tap on the object. Similar-colored connected area is selected; adjust sensitivity if needed.',
+  move: 'Pinch or use ＋/－ to zoom, drag to move the zoomed photo. The ruler moves only when you grab a red handle or the red line. Use Outline －/＋ to shrink or grow the selected area step by step.',
+  fix: 'Paint over parts to remove from the area (e.g. a shadow) – or switch to Add and paint parts that are missing. Zoom in for precision; ↶ undoes.',
+  box: 'Drag a rectangle around the object. Everything outside is ignored. Two fingers zoom/move.',
+  seed: 'Tap on the object. The connected area of similar color is selected. Dragging moves the zoomed photo.',
 };
 
 document.querySelectorAll('.mode').forEach((b) =>
@@ -1346,103 +1394,287 @@ function setMode(mode) {
   state.mode = mode;
   document.querySelectorAll('.mode').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
   $('modeHint').textContent = hints[mode];
+  $('brushBar').hidden = mode !== 'fix';
   if (state.W) draw();
 }
 
-function toWork(e) {
+/* ---- undo ---- */
+const undoStack = [];
+function snapshot() {
+  return {
+    mask: state.mask.slice(), ruler: { a: { ...state.ruler.a }, b: { ...state.ruler.b } },
+    len: $('rulerLen').value, unit: $('unit').value, auto: $('autoScale').checked,
+    periodPx: state.periodPx, tickPx: state.tickPx, perTick: state.perTick, rulerKind: state.rulerKind,
+    persp: state.persp, rulerSource: state.rulerSource, objectSource: state.objectSource,
+    box: state.box && { ...state.box }, seed: state.seed && { ...state.seed }, lastMethod: state.lastMethod,
+    boxFromAI: state.boxFromAI, quad: state.quad, sens: $('sensitivity').value,
+  };
+}
+function pushUndo() {
+  if (!state.W) return;
+  undoStack.push(snapshot());
+  if (undoStack.length > 20) undoStack.shift();
+  $('undoBtn').disabled = false;
+}
+function undo() {
+  const u = undoStack.pop();
+  $('undoBtn').disabled = !undoStack.length;
+  if (!u) return;
+  state.mask = u.mask; state.ruler = u.ruler;
+  $('rulerLen').value = u.len; $('unit').value = u.unit; $('autoScale').checked = u.auto;
+  Object.assign(state, {
+    periodPx: u.periodPx, tickPx: u.tickPx, perTick: u.perTick, rulerKind: u.rulerKind, persp: u.persp,
+    rulerSource: u.rulerSource, objectSource: u.objectSource, box: u.box, seed: u.seed,
+    lastMethod: u.lastMethod, boxFromAI: u.boxFromAI, quad: u.quad,
+  });
+  setSens(parseFloat(u.sens), false);
+  update();
+}
+function clearUndo() { undoStack.length = 0; $('undoBtn').disabled = true; }
+
+/* ---- outline: shrink / grow by one pixel ---- */
+let morphStep = 0;
+function morphMask(grow) {
+  const { W, H } = state, m = state.mask, out = new Uint8Array(m.length);
+  const diag = (morphStep++ & 1) === 1;      // alternate + and □ neighbourhoods → roughly round
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    let v = m[i];
+    const nb = [x > 0 ? m[i - 1] : 0, x < W - 1 ? m[i + 1] : 0, y > 0 ? m[i - W] : 0, y < H - 1 ? m[i + W] : 0];
+    if (diag) nb.push(x > 0 && y > 0 ? m[i - W - 1] : 0, x < W - 1 && y > 0 ? m[i - W + 1] : 0,
+      x > 0 && y < H - 1 ? m[i + W - 1] : 0, x < W - 1 && y < H - 1 ? m[i + W + 1] : 0);
+    if (grow) { if (!v) for (const n of nb) if (n) { v = 1; break; } }
+    else if (v) { for (const n of nb) if (!n) { v = 0; break; } }
+    out[i] = v;
+  }
+  state.mask = out;
+}
+$('shrinkBtn').addEventListener('click', () => { if (!state.W) return; pushUndo(); morphMask(false); markEdited(); update(); });
+$('growBtn').addEventListener('click', () => { if (!state.W) return; pushUndo(); morphMask(true); markEdited(); update(); });
+$('undoBtn').addEventListener('click', undo);
+function markEdited() {
+  if (!/adjusted by hand/.test(state.objectSource)) state.objectSource += ' · adjusted by hand';
+}
+
+/* ---- brush ---- */
+const BRUSH = [{ n: 'S', r: 8 }, { n: 'M', r: 16 }, { n: 'L', r: 28 }, { n: 'XL', r: 44 }];   // radius in CSS px
+const brush = { erase: true, size: 1 };
+function setBrush() {
+  $('brushErase').classList.toggle('on', brush.erase);
+  $('brushAdd').classList.toggle('on', !brush.erase);
+  $('brushSizeVal').textContent = BRUSH[brush.size].n;
+}
+$('brushErase').addEventListener('click', () => { brush.erase = true; setBrush(); });
+$('brushAdd').addEventListener('click', () => { brush.erase = false; setBrush(); });
+$('brushSmaller').addEventListener('click', () => { brush.size = Math.max(0, brush.size - 1); setBrush(); });
+$('brushBigger').addEventListener('click', () => { brush.size = Math.min(BRUSH.length - 1, brush.size + 1); setBrush(); });
+
+function applyBrush(pts, r) {
+  const { W, H } = state, m = state.mask, v = brush.erase ? 0 : 1, r2 = r * r;
+  const stamp = (cx, cy) => {
+    for (let y = Math.max(0, Math.floor(cy - r)); y <= Math.min(H - 1, Math.ceil(cy + r)); y++)
+      for (let x = Math.max(0, Math.floor(cx - r)); x <= Math.min(W - 1, Math.ceil(cx + r)); x++)
+        if ((x - cx) ** 2 + (y - cy) ** 2 <= r2) m[y * W + x] = v;
+  };
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i], q = pts[i + 1] || p;
+    const n = Math.max(1, Math.ceil(Math.hypot(q.x - p.x, q.y - p.y) / Math.max(1, r / 2)));
+    for (let k = 0; k <= n; k++) stamp(p.x + (q.x - p.x) * k / n, p.y + (q.y - p.y) * k / n);
+  }
+}
+
+/* ---- zoom buttons, wheel ---- */
+$('zoomIn').addEventListener('click', () => state.W && zoomAt(1.6, state.W / 2, state.H / 2));
+$('zoomOut').addEventListener('click', () => state.W && zoomAt(1 / 1.6, state.W / 2, state.H / 2));
+$('zoomFit').addEventListener('click', () => { view.s = 1; view.ox = view.oy = 0; if (state.W) draw(); });
+canvas.addEventListener('wheel', (e) => {
+  if (!state.W) return;
+  e.preventDefault();
+  const c = toCanvas(e);
+  zoomAt(Math.exp(-e.deltaY * 0.0015), c.x, c.y);
+}, { passive: false });
+
+/* ---- pointer gestures (touch & mouse) ----
+   one finger: depends on the mode; two fingers: always zoom + move.
+   A second finger cancels a stroke / box that has just started, so a pinch
+   never leaves an accidental edit behind. */
+const pointers = new Map();
+let gesture = null;
+
+function toCanvas(e) {
   const r = canvas.getBoundingClientRect();
   return { x: (e.clientX - r.left) * state.W / r.width, y: (e.clientY - r.top) * state.H / r.height };
 }
+function toWork(e) {
+  const c = toCanvas(e);
+  return { x: view.ox + c.x / view.s, y: view.oy + c.y / view.s };
+}
+function distToSegment(p, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y, L2 = dx * dx + dy * dy || 1;
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / L2));
+  return { d: Math.hypot(p.x - a.x - t * dx, p.y - a.y - t * dy), t };
+}
+
+function startPinch() {
+  const [p1, p2] = [...pointers.values()];
+  gesture = {
+    type: 'pinch', d0: Math.hypot(p2.x - p1.x, p2.y - p1.y) || 1, s0: view.s,
+    w: { x: view.ox + (p1.x + p2.x) / 2 / view.s, y: view.oy + (p1.y + p2.y) / 2 / view.s },
+  };
+}
 
 canvas.addEventListener('pointerdown', (e) => {
-  if (!state.W) return;
-  const p = toWork(e);
-  const ui = state.W / canvas.getBoundingClientRect().width;
-  canvas.setPointerCapture(e.pointerId);
-  state.pointer = p;
-  // ruler handles can always be grabbed
+  if (!state.W || state.busy) return;
+  try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
+  pointers.set(e.pointerId, toCanvas(e));
+  if (pointers.size === 2) {
+    // second finger: drop what the first finger started (nothing was applied yet)
+    if (gesture && gesture.type === 'handle') Object.assign(gesture.h, gesture.h0);
+    if (gesture && gesture.type === 'line') { state.ruler.a = gesture.a0; state.ruler.b = gesture.b0; }
+    if (gesture && gesture.type === 'box') state.box = gesture.box0;
+    startPinch();
+    draw();
+    return;
+  }
+  if (pointers.size > 2) return;
+  const p = toWork(e), c = toCanvas(e), ui = cssPx() / view.s;
   const { a, b } = state.ruler;
   const da = Math.hypot(p.x - a.x, p.y - a.y), db = Math.hypot(p.x - b.x, p.y - b.y);
-  const grab = 28 * ui;
-  if (Math.min(da, db) < grab && (state.mode === 'ruler' || Math.min(da, db) < grab / 2)) {
+  if (state.mode === 'move' && Math.min(da, db) < 26 * ui) {
     const h = da < db ? a : b;
-    state.drag = { type: 'handle', h, off: { x: h.x - p.x, y: h.y - p.y } };
-  } else if (state.mode === 'ruler') {
-    state.drag = { type: 'line', start: p, a0: { ...a }, b0: { ...b } };
+    pushUndo();
+    gesture = { type: 'handle', h, h0: { ...h }, off: { x: h.x - p.x, y: h.y - p.y } };
+  } else if (state.mode === 'move' && distToSegment(p, a, b).d < 14 * ui) {
+    pushUndo();
+    gesture = { type: 'line', start: p, a0: { ...a }, b0: { ...b } };
+  } else if (state.mode === 'fix') {
+    gesture = { type: 'brush', pts: [p], r: BRUSH[brush.size].r * ui };
   } else if (state.mode === 'box') {
-    state.drag = { type: 'box' };
-    state.box = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
-  } else if (state.mode === 'seed') {
-    state.seed = p;
-    state.objectSource = 'region grown from the point you tapped';
-    segmentSeed();
-    state.drag = null;
+    gesture = { type: 'box', start: p, box0: state.box && { ...state.box }, moved: false };
+  } else {
+    gesture = { type: 'pan', c0: c, ox: view.ox, oy: view.oy, moved: false, tap: state.mode === 'seed' };
   }
   draw();
 });
 
 canvas.addEventListener('pointermove', (e) => {
-  if (!state.drag) return;
-  const p = toWork(e);
-  state.pointer = p;
-  const d = state.drag;
+  if (!pointers.has(e.pointerId) || !gesture) return;
+  pointers.set(e.pointerId, toCanvas(e));
+  const g = gesture;
+  if (g.type === 'pinch') {
+    if (pointers.size < 2) return;
+    const [p1, p2] = [...pointers.values()];
+    view.s = g.s0 * Math.hypot(p2.x - p1.x, p2.y - p1.y) / g.d0;
+    clampView();
+    view.ox = g.w.x - (p1.x + p2.x) / 2 / view.s;
+    view.oy = g.w.y - (p1.y + p2.y) / 2 / view.s;
+    clampView();
+    draw();
+    return;
+  }
+  const p = toWork(e), c = toCanvas(e);
   const clampX = (v) => Math.max(0, Math.min(state.W - 1, v));
   const clampY = (v) => Math.max(0, Math.min(state.H - 1, v));
-  if (d.type === 'handle') {
-    d.h.x = clampX(p.x + d.off.x); d.h.y = clampY(p.y + d.off.y);
-    state.pointer = { x: d.h.x, y: d.h.y };
+  if (g.type === 'handle') {
+    g.h.x = clampX(p.x + g.off.x); g.h.y = clampY(p.y + g.off.y);
     computeArea();
-  } else if (d.type === 'line') {
-    const dx = p.x - d.start.x, dy = p.y - d.start.y;
-    state.ruler.a = { x: clampX(d.a0.x + dx), y: clampY(d.a0.y + dy) };
-    state.ruler.b = { x: clampX(d.b0.x + dx), y: clampY(d.b0.y + dy) };
-  } else if (d.type === 'box') {
-    state.box.x1 = clampX(p.x); state.box.y1 = clampY(p.y);
+  } else if (g.type === 'line') {
+    const dx = p.x - g.start.x, dy = p.y - g.start.y;
+    state.ruler.a = { x: clampX(g.a0.x + dx), y: clampY(g.a0.y + dy) };
+    state.ruler.b = { x: clampX(g.b0.x + dx), y: clampY(g.b0.y + dy) };
+  } else if (g.type === 'brush') {
+    g.pts.push(p);
+  } else if (g.type === 'box') {
+    if (!g.moved && Math.hypot(p.x - g.start.x, p.y - g.start.y) * view.s / cssPx() < 10) return;
+    g.moved = true;
+    state.box = { x0: g.start.x, y0: g.start.y, x1: clampX(p.x), y1: clampY(p.y) };
+  } else if (g.type === 'pan') {
+    if (!g.moved && Math.hypot(c.x - g.c0.x, c.y - g.c0.y) / cssPx() < 10) return;
+    g.moved = true;
+    view.ox = g.ox - (c.x - g.c0.x) / view.s;
+    view.oy = g.oy - (c.y - g.c0.y) / view.s;
+    clampView();
   }
   draw();
 });
 
-const endDrag = () => {
-  if (!state.drag) return;
-  const d = state.drag;
-  state.drag = null;
-  if (d.type === 'box') {
+function endPointer(e, cancelled) {
+  if (!pointers.has(e.pointerId)) return;
+  pointers.delete(e.pointerId);
+  const g = gesture;
+  if (!g) return;
+  if (g.type === 'pinch') {
+    if (pointers.size === 0) gesture = null;      // lifting the fingers one by one does nothing else
+    return;
+  }
+  gesture = null;
+  if (cancelled) { draw(); return; }
+  if (g.type === 'brush') {
+    pushUndo();
+    applyBrush(g.pts, g.r);
+    markEdited();
+    update();
+  } else if (g.type === 'box') {
+    const b = state.box && normBox(state.box);
+    if (!g.moved || !b || (b.x1 - b.x0) < 8 || (b.y1 - b.y0) < 8) { state.box = g.box0; draw(); return; }
+    pushUndo();
     state.boxFromAI = false;
     state.objectSource = 'your box + image analysis';
     segmentBox();
-  } else {
-    rulerAfterUserMove(d);
+  } else if (g.type === 'pan') {
+    if (g.tap && !g.moved) {
+      pushUndo();
+      state.seed = toWork(e);
+      state.objectSource = 'region grown from the point you tapped';
+      segmentSeed();
+    } else draw();
+  } else {                                        // handle / line
+    rulerAfterUserMove(g);
     update();
   }
-};
-canvas.addEventListener('pointerup', endDrag);
-canvas.addEventListener('pointercancel', endDrag);
+}
+canvas.addEventListener('pointerup', (e) => endPointer(e, false));
+canvas.addEventListener('pointercancel', (e) => endPointer(e, true));
 
+/* ---- other controls ---- */
+$('rulerLen').addEventListener('change', () => pushUndoOnce());
 $('rulerLen').addEventListener('input', () => {
   $('autoScale').checked = false;
   state.rulerSource = 'length entered manually';
   computeArea(); draw();
 });
+let lenUndoArmed = true;
+function pushUndoOnce() { lenUndoArmed = true; }
+$('rulerLen').addEventListener('focus', () => { if (lenUndoArmed) { pushUndo(); lenUndoArmed = false; } });
 $('unit').addEventListener('change', () => {
   if (autoScale() && state.tickPx && state.rulerKind !== 'unknown') setLengthFromTicks(ticksBetweenHandles());
   computeArea(); draw();
 });
 $('autoScale').addEventListener('change', () => {
-  if (autoScale() && state.W) { rulerAfterUserMove({ type: 'line' }); update(); }
+  if (autoScale() && state.W) { pushUndo(); rulerAfterUserMove({ type: 'line' }); update(); }
 });
 $('rulerBtn').addEventListener('click', async () => {
   if (!state.W) return;
+  pushUndo();
   $('autoScale').checked = true;
   await findRulerAuto();
 });
-let sensTimer;
-$('sensitivity').addEventListener('input', () => {
-  clearTimeout(sensTimer);
-  sensTimer = setTimeout(() => (state.lastMethod === 'seed' && state.seed ? segmentSeed() : segmentBox()), 120);
-});
-$('rectFit').addEventListener('change', () => resegment());
-$('convex').addEventListener('change', () => (state.lastMethod === 'seed' && state.seed ? segmentSeed() : segmentBox()));
+
+// detection sensitivity: − / + steps instead of a slider (easier on a phone)
+function setSens(v, rerun = true) {
+  v = Math.round(Math.max(0.4, Math.min(1.8, v)) * 10) / 10;
+  $('sensitivity').value = v;
+  $('sensVal').textContent = v.toFixed(1);
+  $('sensDown').disabled = v <= 0.4; $('sensUp').disabled = v >= 1.8;
+  if (rerun && state.W) { pushUndo(); resegment(); }
+}
+$('sensDown').addEventListener('click', () => setSens(sensitivity() - 0.1));
+$('sensUp').addEventListener('click', () => setSens(sensitivity() + 0.1));
+$('rectFit').addEventListener('change', () => { pushUndo(); resegment(); });
+$('convex').addEventListener('change', () => { pushUndo(); resegment(); });
 $('autoBtn').addEventListener('click', () => {
+  if (!state.W) return;
+  pushUndo();
   const m = 0.04, { W, H } = state;
   state.box = { x0: W * m, y0: H * m, x1: W * (1 - m), y1: H * (1 - m) };
   state.objectName = '';
@@ -1451,6 +1683,7 @@ $('autoBtn').addEventListener('click', () => {
   segmentBox();
 });
 window.addEventListener('resize', () => state.W && draw());
+setBrush();
 
 /* ------------------------------------------------- Chrome built-in AI */
 
