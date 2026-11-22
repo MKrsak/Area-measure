@@ -89,7 +89,7 @@ function loadImage(src) {
     feat: blurLab(toFeat(data, W, H), W, H),
     mask: new Uint8Array(W * H),
     maskCanvas: document.createElement('canvas'),
-    seed: null, objectName: '', src, G: null, periodPx: 0, tickPx: 0, perTick: 1, persp: null,
+    seed: null, objectName: '', src, G: null, periodPx: 0, tickPx: 0, perTick: 1, persp: null, gmag: null, quad: null,
     rulerSource: 'not set – place the red handles on the ruler', boxFromAI: false,
     objectSource: 'image analysis (whole photo)',
   });
@@ -171,6 +171,38 @@ async function findRulerAuto() {
   }
   setBusy('');
   resegment();
+  if (rulerOnObject()) resegment();
+}
+
+// A ruler lying on the object (and hanging over its edge) is only flat and at
+// the right height on the object: read the scale from that part alone.
+function rulerOnObject() {
+  if (!state.tickPx || !state.ruler || !autoScale()) return false;
+  const { a, b } = state.ruler, { W, H, mask } = state;
+  const len = Math.hypot(b.x - a.x, b.y - a.y);
+  if (len < 10) return false;
+  // extend a little beyond the handles: the ticks often continue
+  const ext = len * 0.1, dx = (b.x - a.x) / len, dy = (b.y - a.y) / len;
+  let run = 0, best = [0, 0], start = 0;
+  const T0 = -ext, T1 = len + ext;
+  for (let t = T0; t <= T1 + 1; t++) {
+    const x = Math.round(a.x + dx * t), y = Math.round(a.y + dy * t);
+    const inside = t <= T1 && x >= 0 && y >= 0 && x < W && y < H && mask[y * W + x];
+    if (inside) { if (!run) start = t; run++; }
+    else { if (run > best[1] - best[0]) best = [start, t - 1]; run = 0; }
+  }
+  const mm = state.periodPx, inLen = (best[1] - best[0]) / mm, total = (T1 - T0) / mm;
+  if (inLen < 100 || total - inLen < 20) return false;   // ≥ 10 cm on the object, ≥ 2 cm off it
+  const k = srcToWork(), m = 3 * mm;                     // stay 3 mm away from the object's edge
+  const A = { x: (a.x + dx * (best[0] + m)) / k, y: (a.y + dy * (best[0] + m)) / k };
+  const B = { x: (a.x + dx * (best[1] - m)) / k, y: (a.y + dy * (best[1] - m)) / k };
+  let res = null;
+  try {
+    res = Ruler.zoomRefine(state.src, A, B, { hintPx: state.tickPx / k, half: Math.max(15, state.tickPx / k * 4), imperial: imperial(), exact: true });
+  } catch (err) { console.error(err); }
+  if (!res || res.kind === 'unknown' || res.ticks < 80) return false;
+  applyRuler(res, 'Read on the part of the ruler lying on the object');
+  return true;
 }
 
 // after the user moved the ruler: re-read ticks near the new position
@@ -393,11 +425,17 @@ function segmentBox(shadowMode = 2) {
   const thrLow = Math.min(thr, Math.max(4, bgP97 * 1.3, thr * 0.4) / sensitivity());
   let fg = new Uint8Array(bw * bh);
   for (let i = 0; i < fg.length; i++) fg[i] = dist[i] > thr ? 1 : 0;
+  // background-likeness of every pixel, for the rectangle fitting
+  state.bgLike = new Uint8Array(W * H);
+  for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++)
+    if (dist[y * bw + x] <= thrLow) state.bgLike[(y + y0) * W + x + x0] = 1;
 
   // 3b. ignore background that only looks different because of light:
   //     same chromaticity as the background, but darker (shadow) or brighter
   //     and textured (relief of the cloth, glare on a rough surface)
   const bgVar = shadowMode ? backgroundVariation(fsamples, x0, y0, bw, bh, shadowMode) : new Uint8Array(bw * bh);
+  for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++)
+    if (bgVar[y * bw + x]) state.bgLike[(y + y0) * W + x + x0] = 1;
   for (let i = 0; i < fg.length; i++) if (fg[i] && bgVar[i]) fg[i] = 0;
   {
     const stack = new Int32Array(bw * bh);
@@ -459,7 +497,180 @@ function segmentBox(shadowMode = 2) {
   for (let y = 0; y < bh; y++)
     for (let x = 0; x < bw; x++)
       if (comp[y * bw + x]) state.mask[(y + y0) * W + (x + x0)] = 1;
+
+  // boxes, books, paper …: straighten the outline to a quadrilateral whose
+  // sides sit on the photo's edges (exact corners, tape / glare / bumps ignored)
+  state.quad = null;
+  state.objectSource = state.objectSource.replace(/ · straightened.*$/, '');
+  if ($('rectFit').checked) {
+    const q = fitQuad(state.mask, W, H);
+    if (q) {
+      state.quad = q;
+      state.mask = polygonMask(q, W, H);
+      state.objectSource += ' · straightened to a rectangle';
+    }
+  }
   update();
+}
+
+/* ------------------------------------------------- rectangle fitting */
+
+function polygonMask(pts, W, H) {
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const x = c.getContext('2d', { willReadFrequently: true });
+  x.fillStyle = '#fff'; x.beginPath();
+  pts.forEach((p, i) => (i ? x.lineTo(p.x, p.y) : x.moveTo(p.x, p.y)));
+  x.closePath(); x.fill();
+  const d = x.getImageData(0, 0, W, H).data;
+  c.width = c.height = 0;
+  const m = new Uint8Array(W * H);
+  for (let i = 0; i < m.length; i++) m[i] = d[i * 4 + 3] > 127 ? 1 : 0;
+  return m;
+}
+
+function polyArea(p) {
+  let a = 0;
+  for (let i = 0; i < p.length; i++) { const q = p[(i + 1) % p.length]; a += p[i].x * q.y - q.x * p[i].y; }
+  return Math.abs(a) / 2;
+}
+
+// color gradient magnitude of the whole working image (cached)
+function gradMag() {
+  if (state.gmag) return state.gmag;
+  const { W, H, lab } = state, g = new Float32Array(W * H);
+  for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+    let s = 0;
+    for (let c = 0; c < 3; c++) {
+      const at = (dx, dy) => lab[((y + dy) * W + x + dx) * 3 + c];
+      const gx = at(1, -1) + 2 * at(1, 0) + at(1, 1) - at(-1, -1) - 2 * at(-1, 0) - at(-1, 1);
+      const gy = at(-1, 1) + 2 * at(0, 1) + at(1, 1) - at(-1, -1) - 2 * at(0, -1) - at(1, -1);
+      s += (c ? 0.8 : 1) * (gx * gx + gy * gy);
+    }
+    g[y * W + x] = Math.sqrt(s);
+  }
+  return (state.gmag = g);
+}
+
+function fitQuad(mask, W, H) {
+  // convex hull of the shape
+  const pts = [];
+  let area = 0;
+  for (let y = 0; y < H; y++) {
+    let l = -1, r = -1;
+    for (let x = 0; x < W; x++) if (mask[y * W + x]) { area++; if (l < 0) l = x; r = x; }
+    if (l >= 0) { pts.push({ x: l, y }); if (r !== l) pts.push({ x: r + 1, y }); }
+  }
+  if (pts.length < 8 || area < 500) return null;
+  pts.sort((a, b) => a.x - b.x || a.y - b.y);
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lo = [], up = [];
+  for (const p of pts) { while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
+  for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; while (up.length >= 2 && cross(up[up.length - 2], up[up.length - 1], p) <= 0) up.pop(); up.push(p); }
+  let hull = lo.slice(0, -1).concat(up.slice(0, -1));
+  if (hull.length < 4) return null;
+  // simplify the hull to 4 corners (drop the vertex that matters least)
+  while (hull.length > 4) {
+    let bi = 0, ba = Infinity;
+    for (let i = 0; i < hull.length; i++) {
+      const a = hull[(i + hull.length - 1) % hull.length], b = hull[i], c = hull[(i + 1) % hull.length];
+      const t = Math.abs(cross(a, b, c));
+      if (t < ba) { ba = t; bi = i; }
+    }
+    hull.splice(bi, 1);
+  }
+  // is the shape really a quadrilateral?
+  const qa = polyArea(hull);
+  if (area / qa < 0.93 || area / qa > 1.06) return null;
+  // corners must be clearly separated (no triangles / slivers)
+  for (let i = 0; i < 4; i++) {
+    const a = hull[i], b = hull[(i + 1) % 4];
+    if (Math.hypot(b.x - a.x, b.y - a.y) < Math.sqrt(qa) * 0.25) return null;
+  }
+  // move every side onto the strongest nearby edge and fit a straight line
+  const g = gradMag(), bgL = state.bgLike;
+  const cx = hull.reduce((s, p) => s + p.x, 0) / 4, cy = hull.reduce((s, p) => s + p.y, 0) / 4;
+  const R = Math.max(4, Math.round(Math.max(W, H) * 0.012));
+  const lines = [];
+  for (let i = 0; i < 4; i++) {
+    const P = hull[i], Q = hull[(i + 1) % 4];
+    const len = Math.hypot(Q.x - P.x, Q.y - P.y);
+    const d = { x: (Q.x - P.x) / len, y: (Q.y - P.y) / len };
+    let n = { x: -d.y, y: d.x };
+    if ((P.x + Q.x) / 2 * n.x + (P.y + Q.y) / 2 * n.y < cx * n.x + cy * n.y) n = { x: -n.x, y: -n.y };   // outward
+    const found = [];
+    const N = Math.max(20, Math.round(len / 3));
+    for (let k = 0; k <= N; k++) {
+      const t = 0.08 + 0.84 * k / N;
+      const bx = P.x + (Q.x - P.x) * t, by = P.y + (Q.y - P.y) * t;
+      // edge candidates along the normal; prefer the outermost clear edge
+      // with background right outside it (not the inner border of a print)
+      const prof = [];
+      for (let s2 = -R; s2 <= R; s2++) {
+        const X = Math.round(bx + n.x * s2), Y = Math.round(by + n.y * s2);
+        prof.push(X < 1 || Y < 1 || X >= W - 1 || Y >= H - 1 ? 0 : g[Y * W + X]);
+      }
+      let mx = 0;
+      for (const v of prof) mx = Math.max(mx, v);
+      if (!mx) continue;
+      const bgAt = (s2) => {
+        const X = Math.round(bx + n.x * s2), Y = Math.round(by + n.y * s2);
+        return X >= 0 && Y >= 0 && X < W && Y < H && bgL && bgL[Y * W + X] === 1;
+      };
+      let bs = null, bw2 = 0;
+      for (let j = prof.length - 2; j >= 1; j--) {
+        const v = prof[j];
+        if (v < mx * 0.3 || v < prof[j - 1] || v < prof[j + 1]) continue;   // local maximum, strong enough
+        const s2 = j - R;
+        if (bgAt(s2 + 2) && bgAt(s2 + 3)) { bs = s2; bw2 = v; break; }
+      }
+      if (bs === null) {                                     // fall back: strongest edge near the outline
+        let best = 0;
+        for (let j = 0; j < prof.length; j++) {
+          const v = prof[j] * Math.exp(-0.5 * ((j - R) / (R * 0.7)) ** 2);
+          if (v > best) { best = v; bs = j - R; bw2 = prof[j]; }
+        }
+      }
+      if (bs !== null) found.push({ x: bx + n.x * bs, y: by + n.y * bs, w: bw2 });
+    }
+    if (found.length < 8) return null;
+    const ws = found.map((f) => f.w).sort((a, b) => a - b), wMed = ws[ws.length >> 1];
+    let use = found.filter((f) => f.w > wMed * 0.4);
+    let L = null;
+    for (let it = 0; it < 3; it++) {
+      L = fitLine(use);
+      if (!L) return null;
+      const res = use.map((f) => Math.abs((f.x - L.px) * L.nx + (f.y - L.py) * L.ny));
+      const sr = res.slice().sort((a, b) => a - b), mr = sr[sr.length >> 1];
+      const keep = use.filter((f, j) => res[j] <= Math.max(1.5, mr * 2.5));
+      if (keep.length < 6 || keep.length === use.length) break;
+      use = keep;
+    }
+    lines.push(L);
+  }
+  const corners = [];
+  for (let i = 0; i < 4; i++) {
+    const a = lines[(i + 3) % 4], b = lines[i];
+    const det = a.nx * b.ny - a.ny * b.nx;
+    if (Math.abs(det) < 0.2) return null;                  // sides nearly parallel
+    const ca = a.nx * a.px + a.ny * a.py, cb = b.nx * b.px + b.ny * b.py;
+    corners.push({ x: (ca * b.ny - cb * a.ny) / det, y: (a.nx * cb - b.nx * ca) / det });
+  }
+  const na = polyArea(corners);
+  if (na / qa < 0.9 || na / qa > 1.12) return null;
+  for (const c of corners) if (c.x < -2 || c.y < -2 || c.x > W + 1 || c.y > H + 1) return null;
+  return corners;
+}
+
+// total least squares line through points → point (px,py) and unit normal
+function fitLine(ps) {
+  if (ps.length < 2) return null;
+  let mx = 0, my = 0;
+  for (const p of ps) { mx += p.x; my += p.y; }
+  mx /= ps.length; my /= ps.length;
+  let sxx = 0, syy = 0, sxy = 0;
+  for (const p of ps) { sxx += (p.x - mx) ** 2; syy += (p.y - my) ** 2; sxy += (p.x - mx) * (p.y - my); }
+  const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);          // direction of the line
+  return { px: mx, py: my, nx: -Math.sin(ang), ny: Math.cos(ang) };
 }
 
 // Pixels of the ruler/tape body: walk across the ruler from the tick line
@@ -1229,6 +1440,7 @@ $('sensitivity').addEventListener('input', () => {
   clearTimeout(sensTimer);
   sensTimer = setTimeout(() => (state.lastMethod === 'seed' && state.seed ? segmentSeed() : segmentBox()), 120);
 });
+$('rectFit').addEventListener('change', () => resegment());
 $('convex').addEventListener('change', () => (state.lastMethod === 'seed' && state.seed ? segmentSeed() : segmentBox()));
 $('autoBtn').addEventListener('click', () => {
   const m = 0.04, { W, H } = state;

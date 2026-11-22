@@ -569,14 +569,15 @@ const Ruler = (() => {
 
   // measure ticks in a zoomed, full-resolution strip around a rough line
   // (a, b in source px). hintPx: rough tick spacing in source px, if known.
-  function zoomRefine(src, a, b, { hintPx = 0, half = 0, imperial = false } = {}) {
+  function zoomRefine(src, a, b, { hintPx = 0, half = 0, imperial = false, exact = false } = {}) {
     const len = Math.hypot(b.x - a.x, b.y - a.y);
     if (len < 20) return null;
     half = half || Math.max(20, len * 0.06);
     // aim for ≥ ~7 px per smallest tick; the hint might be a 5 mm or 1 cm spacing
     const zoom = hintPx ? Math.max(1, Math.min(4, 70 / hintPx)) : Math.max(1, Math.min(3, 2000 / len));
     // the strip reaches well past the rough line – the ruler is often longer
-    const G = zoomStrip(src, a, b, half, zoom, 0.6);
+    // exact: measure only between a and b (e.g. the part of a tape lying on the object)
+    const G = zoomStrip(src, a, b, half, zoom, exact ? 0.01 : 0.6);
     if (!G) return null;
     const A = toG(G, a), B = toG(G, b);
     const L = Math.hypot(B.x - A.x, B.y - A.y);

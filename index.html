@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Area Measure</title>
   <meta name="description" content="Take a photo of an object next to a ruler and measure its area.">
-  <link rel="stylesheet" href="style.css?v=11">
+  <link rel="stylesheet" href="style.css?v=12">
 </head>
 <body>
   <header>
@@ -67,6 +67,7 @@
         <label>Detection sensitivity
           <input id="sensitivity" type="range" min="0.4" max="1.8" step="0.05" value="1">
         </label>
+        <label class="check"><input id="rectFit" type="checkbox" checked> Straighten rectangular objects (box, book, paper) to exact edges</label>
         <label class="check"><input id="convex" type="checkbox"> Object has a convex shape (book, box, card, plate…) – fill the outline</label>
       </div>
 
@@ -114,9 +115,9 @@
     </div>
   </div>
 
-  <p class="version">Version 11</p>
-  <script src="ruler.js?v=11"></script>
-  <script src="camera.js?v=11"></script>
-  <script src="app.js?v=11"></script>
+  <p class="version">Version 12</p>
+  <script src="ruler.js?v=12"></script>
+  <script src="camera.js?v=12"></script>
+  <script src="app.js?v=12"></script>
 </body>
 </html>
