@@ -79,6 +79,7 @@ function loadImage(src) {
   Object.assign(state, {
     W, H, workCanvas: wc,
     lab: blurLab(toLab(data, W, H), W, H),
+    feat: blurLab(toFeat(data, W, H), W, H),
     mask: new Uint8Array(W * H),
     maskCanvas: document.createElement('canvas'),
     seed: null, objectName: '', src, G: null, periodPx: 0, tickPx: 0, perTick: 1,
@@ -220,6 +221,44 @@ function toLab(rgba, W, H) {
   return out;
 }
 
+// Chromaticity (which color, independent of brightness) and log brightness.
+// Shadows and the light/dark relief of a textured cloth change brightness but
+// hardly the chromaticity.
+const CHROMA = 600, BRIGHT = 40;
+function toFeat(rgba, W, H) {
+  const n = W * H, out = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const r = rgba[i * 4] + 3, g = rgba[i * 4 + 1] + 3, b = rgba[i * 4 + 2] + 3, s = r + g + b;
+    out[i * 3] = CHROMA * r / s;
+    out[i * 3 + 1] = CHROMA * g / s;
+    out[i * 3 + 2] = BRIGHT * Math.log(s / 3);
+  }
+  return out;
+}
+
+// local standard deviation of brightness (texture measure), window (2r+1)²
+function localStd(lab, W, H, r) {
+  const S = new Float64Array((W + 1) * (H + 1)), S2 = new Float64Array((W + 1) * (H + 1));
+  for (let y = 0; y < H; y++) {
+    let a = 0, b = 0;
+    for (let x = 0; x < W; x++) {
+      const v = lab[(y * W + x) * 3];
+      a += v; b += v * v;
+      const k = (y + 1) * (W + 1) + x + 1;
+      S[k] = S[k - W - 1] + a; S2[k] = S2[k - W - 1] + b;
+    }
+  }
+  const out = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const ya = Math.max(0, y - r), yb = Math.min(H, y + r + 1), xa = Math.max(0, x - r), xb = Math.min(W, x + r + 1);
+    const n = (yb - ya) * (xb - xa);
+    const q = (A) => A[yb * (W + 1) + xb] - A[ya * (W + 1) + xb] - A[yb * (W + 1) + xa] + A[ya * (W + 1) + xa];
+    const m = q(S) / n;
+    out[y * W + x] = Math.sqrt(Math.max(0, q(S2) / n - m * m));
+  }
+  return out;
+}
+
 // separable box blur, radius 2, to reduce noise / texture
 function blurLab(src, W, H) {
   const r = 2;
@@ -261,7 +300,9 @@ function sensitivity() { return parseFloat($('sensitivity').value) || 1; }
 // Object inside a box: background model from a ring around the box,
 // Otsu threshold on color distance, best connected component, holes filled.
 
-function segmentBox() {
+// shadowMode: 2 = ignore shadows, 1 = only light shadows, 0 = off (fallbacks
+// for dark grey objects on a grey background, which look like a shadow)
+function segmentBox(shadowMode = 2) {
   state.lastMethod = 'box';
   const { W, H, lab } = state;
   // an AI box is only approximate: analyse the whole photo and use the box
@@ -274,12 +315,14 @@ function segmentBox() {
 
   // 1. background samples: ring just outside the box (or inside if at the image edge)
   const ring = Math.max(4, Math.round(0.03 * Math.max(x1 - x0, y1 - y0)));
-  const samples = [];
+  const samples = [], fsamples = [];
+  const feat = state.feat;
   const step = Math.max(1, Math.round(Math.sqrt(((x1 - x0) + (y1 - y0)) * 2 * ring / 3000)));
   const addSample = (x, y) => {
     if (x < 0 || y < 0 || x >= W || y >= H) return;
     const i = (y * W + x) * 3;
     samples.push(lab[i], lab[i + 1], lab[i + 2]);
+    fsamples.push(feat[i], feat[i + 1], feat[i + 2]);
   };
   // sides where the box touches the image edge have no outside ring:
   // there, sample a thin band just inside the box instead
@@ -328,6 +371,12 @@ function segmentBox() {
   let fg = new Uint8Array(bw * bh);
   for (let i = 0; i < fg.length; i++) fg[i] = dist[i] > thr ? 1 : 0;
 
+  // 3b. ignore background that only looks different because of light:
+  //     same chromaticity as the background, but darker (shadow) or brighter
+  //     and textured (relief of the cloth, glare on a rough surface)
+  const bgVar = shadowMode ? backgroundVariation(fsamples, x0, y0, bw, bh, shadowMode) : new Uint8Array(bw * bh);
+  for (let i = 0; i < fg.length; i++) if (fg[i] && bgVar[i]) fg[i] = 0;
+
   // 4. add strong edges – they close the outline where the object's color
   //    is similar to the background (e.g. a light part of a book cover)
   const edges = edgeMap(x0, y0, bw, bh);
@@ -343,6 +392,7 @@ function segmentBox() {
   const rc = Math.max(2, Math.round(Math.max(bw, bh) * 0.006));
   fg = erode(dilate(fg, bw, bh, rc), bw, bh, rc);
   fillHoles(fg, bw, bh);
+  fg = dropBorderPattern(fg, x0, y0, bw, bh) || fg;
   const ro = Math.max(2, Math.round(Math.max(bw, bh) * 0.008));
   fg = dilate(erode(fg, bw, bh, ro), bw, bh, ro);
 
@@ -350,17 +400,23 @@ function segmentBox() {
   const local = { x0: hint.x0 - x0, y0: hint.y0 - y0, x1: hint.x1 - x0, y1: hint.y1 - y0 };
   let comp = bestComponent(fg, bw, bh, state.boxFromAI ? local : null);
   if (!comp) { state.mask.fill(0); update(); return; }
+
   fillHoles(comp, bw, bh);
   // edges/closing make the outline a few px too fat: in a thin band along the
   // border, drop pixels whose color matches the background
   const inner = erode(comp, bw, bh, 3);
   for (let i = 0; i < comp.length; i++)
-    if (comp[i] && !inner[i] && dist[i] <= thr) comp[i] = 0;
+    if (comp[i] && !inner[i] && (dist[i] <= thr || bgVar[i])) comp[i] = 0;
   comp = bestComponent(comp, bw, bh, state.boxFromAI ? local : null) || comp;
   fillHoles(comp, bw, bh);
   if ($('convex').checked) comp = convexFill(comp, bw, bh);
   if (rm) for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++)
     if (rm[(y + y0) * W + (x + x0)]) comp[y * bw + x] = 0;
+
+  // (almost) nothing left? the object probably looked like a shadow – retry milder
+  let cnt = 0;
+  for (const v of comp) cnt += v;
+  if (shadowMode && cnt < bw * bh * 0.01) return segmentBox(shadowMode - 1);
 
   state.mask.fill(0);
   for (let y = 0; y < bh; y++)
@@ -443,6 +499,88 @@ function rulerMask() {
     if (i >= 0) m[i / 3] = 1;
   }
   return m;
+}
+
+// 1 where a pixel is background seen in different light (see segmentBox 3b)
+function backgroundVariation(fsamples, x0, y0, bw, bh, mode) {
+  const { W, feat, lab } = state;
+  const km = kmeans(fsamples, 6, 10);
+  const nS = fsamples.length / 3, cs = [];
+  for (let j = 0; j < km.counts.length; j++)
+    if (km.counts[j] >= nS * 0.06) cs.push(km.centers[j * 3], km.centers[j * 3 + 1], km.centers[j * 3 + 2]);
+  if (!cs.length) return new Uint8Array(bw * bh);
+  const nearest = (a, b) => {
+    let bd = Infinity, bc = 0;
+    for (let c = 0; c < cs.length; c += 3) {
+      const d = (a - cs[c]) ** 2 + (b - cs[c + 1]) ** 2;
+      if (d < bd) { bd = d; bc = c; }
+    }
+    return [Math.sqrt(bd), bc];
+  };
+  // how much the background's chromaticity scatters by itself
+  const sd = [];
+  for (let i = 0; i < fsamples.length; i += 3) sd.push(nearest(fsamples[i], fsamples[i + 1])[0]);
+  sd.sort((a, b) => a - b);
+  const thrC = Math.max(4, 1.8 * (sd[Math.floor(sd.length * 0.9)] || 0)) * sensitivity();
+  const std = localStd(lab, state.W, state.H, 3);
+  const DARKER = BRIGHT * Math.log(0.95), DARKEST = BRIGHT * Math.log(mode === 2 ? 0.3 : 0.8);
+  const BRIGHTER = BRIGHT * Math.log(1.05), TEXTURE = 3;
+  const out = new Uint8Array(bw * bh);
+  for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+    const p = (y + y0) * W + x + x0, i = p * 3;
+    const [dc, c] = nearest(feat[i], feat[i + 1]);
+    if (dc > thrC) continue;
+    const db = feat[i + 2] - cs[c + 2];
+    if ((db < DARKER && db > DARKEST) || (db > BRIGHTER && std[p] > TEXTURE)) out[y * bw + x] = 1;
+  }
+  return out;
+}
+
+// A background pattern (a stripe of a tablecloth …) that touches the object
+// usually also runs off the edge of the analysed area. Starting at the border,
+// remove the part of the shape that is reachable through similar colors; an
+// object with a clearly different color stops it.
+function dropBorderPattern(comp, x0, y0, bw, bh, tol = 7) {
+  const { W, lab } = state;
+  const seeds = [];
+  for (let x = 0; x < bw; x++) seeds.push(x, (bh - 1) * bw + x);
+  for (let y = 1; y < bh - 1; y++) seeds.push(y * bw, y * bw + bw - 1);
+  const s0 = seeds.filter((i) => comp[i]);
+  let total = 0;
+  for (const v of comp) total += v;
+  if (s0.length < 5 || !total) return null;
+  const L = (i) => (((i / bw) | 0) + y0) * W + (i % bw) + x0;
+  // colors of the shape where it touches the border
+  const smp = [];
+  for (const i of s0) { const p = L(i) * 3; smp.push(lab[p], lab[p + 1], lab[p + 2]); }
+  const km = kmeans(smp, Math.min(4, s0.length), 8), cs = km.centers;
+  const TOL2 = (tol * sensitivity()) ** 2, STEP2 = (tol * 0.57) ** 2;
+  const near = (p) => {
+    for (let c = 0; c < cs.length; c += 3) {
+      const d = (lab[p] - cs[c]) ** 2 + (lab[p + 1] - cs[c + 1]) ** 2 + (lab[p + 2] - cs[c + 2]) ** 2;
+      if (d < TOL2) return true;
+    }
+    return false;
+  };
+  const seen = new Uint8Array(bw * bh), stack = new Int32Array(bw * bh);
+  let sp = 0, removed = 0;
+  for (const i of s0) if (near(L(i) * 3)) { seen[i] = 1; stack[sp++] = i; }
+  while (sp) {
+    const i = stack[--sp], x = i % bw, y = (i / bw) | 0, p = L(i) * 3;
+    removed++;
+    for (const j of [x > 0 ? i - 1 : -1, x < bw - 1 ? i + 1 : -1, y > 0 ? i - bw : -1, y < bh - 1 ? i + bw : -1]) {
+      if (j < 0 || seen[j] || !comp[j]) continue;
+      const q = L(j) * 3;
+      const st = (lab[q] - lab[p]) ** 2 + (lab[q + 1] - lab[p + 1]) ** 2 + (lab[q + 2] - lab[p + 2]) ** 2;
+      if (st < STEP2 && near(q)) { seen[j] = 1; stack[sp++] = j; }
+    }
+  }
+  // nearly everything reachable → it is the object itself, cut by the border
+  if (!removed) return null;
+  if (removed > total * 0.7) return tol > 4 ? dropBorderPattern(comp, x0, y0, bw, bh, tol * 0.6) : null;
+  const out = comp.slice();
+  for (let i = 0; i < out.length; i++) if (seen[i]) out[i] = 0;
+  return out;
 }
 
 // Region growing from a tapped point
@@ -607,7 +745,8 @@ function morph(m, W, H, r, isErode) {
     let v = isErode ? 1 : 0;
     for (let k = -r; k <= r; k++) {
       const xx = x + k;
-      const s = xx < 0 || xx >= W ? (isErode ? 0 : 0) : m[y * W + xx];
+      if (xx < 0 || xx >= W) continue;          // outside the image does not erode
+      const s = m[y * W + xx];
       if (isErode && !s) { v = 0; break; }
       if (!isErode && s) { v = 1; break; }
     }
@@ -617,7 +756,8 @@ function morph(m, W, H, r, isErode) {
     let v = isErode ? 1 : 0;
     for (let k = -r; k <= r; k++) {
       const yy = y + k;
-      const s = yy < 0 || yy >= H ? 0 : tmp[yy * W + x];
+      if (yy < 0 || yy >= H) continue;
+      const s = tmp[yy * W + x];
       if (isErode && !s) { v = 0; break; }
       if (!isErode && s) { v = 1; break; }
     }
