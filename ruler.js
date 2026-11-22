@@ -16,6 +16,7 @@
 const Ruler = (() => {
   const T = 64;               // FFT tile size
   const MAX_SIDE = 2400;      // resolution used for ruler analysis
+  const SUB = 2;              // profile samples per pixel (fine ticks, ~3 px apart)
 
   function makeGray(src) {
     const s = Math.min(1, MAX_SIDE / Math.max(src.width, src.height));
@@ -120,11 +121,11 @@ const Ruler = (() => {
 
   // profile along origin + t*d, t in [t0, t1], averaged over ±1 px across
   function profile(G, o, d, t0, t1) {
-    const n = Math.max(0, Math.floor(t1 - t0));
+    const n = Math.max(0, Math.floor((t1 - t0) * SUB));
     const nx = -d.y, ny = d.x;
     const p = new Float32Array(n);
     for (let i = 0; i < n; i++) {
-      const t = t0 + i;
+      const t = t0 + i / SUB;
       let s = 0, c = 0;
       for (let k = -1; k <= 1; k++) {
         const v = sample(G, o.x + d.x * t + nx * k, o.y + d.y * t + ny * k);
@@ -132,7 +133,13 @@ const Ruler = (() => {
       }
       p[i] = c ? s / c : NaN;
     }
-    return p;
+    // light smoothing: makes the correlation tolerant to fractional periods
+    const q = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const a = p[Math.max(0, i - 1)], b = p[i], c = p[Math.min(n - 1, i + 1)];
+      q[i] = isNaN(a) || isNaN(c) ? b : (a + 2 * b + c) / 4;
+    }
+    return q;
   }
 
   // remove slow brightness changes (numbers, shadows) – keep the ticks
@@ -198,8 +205,8 @@ const Ruler = (() => {
     for (let off = -offRange; off <= offRange; off += step) {
       const oo = { x: o.x + n.x * off, y: o.y + n.y * off };
       const raw = profile(G, oo, d, t0, t1);
-      const x = detrend(raw, pMax * 0.75);
-      const bl = bestLag(x, pMin, pMax);
+      const x = detrend(raw, pMax * 0.75 * SUB);
+      const bl = bestLag(x, pMin * SUB, pMax * SUB);
       if (bl && (!best || bl.r > best.r)) best = { ...bl, off, o: oo, x };
     }
     if (!best || best.r < 0.3) return null;
@@ -312,12 +319,12 @@ const Ruler = (() => {
     else if (N >= 10) N -= N % 5;
     // center the chosen span within the detected ticks
     const shift = Math.floor((tk.count - N) / 2);
-    const tA = line.t0 + tk.first + shift * P, tB = tA + N * P;
+    const tA = line.t0 + (tk.first + shift * P) / SUB, tB = tA + N * P / SUB;
     const { o, d } = line;
     return {
       a: { x: (o.x + d.x * tA) / G.scale, y: (o.y + d.y * tA) / G.scale },
       b: { x: (o.x + d.x * tB) / G.scale, y: (o.y + d.y * tB) / G.scale },
-      ticks: N, periodPx: P / G.scale, strength: line.r,
+      ticks: N, periodPx: P / SUB / G.scale, strength: line.r,
     };
   }
 
@@ -401,7 +408,7 @@ const Ruler = (() => {
         if (tried.has(sig)) continue;
         tried.add(sig);
         const o = { x: n.x * band.bo, y: n.y * band.bo };
-        const line = fitLine(G, o, d, t0, t1, T * 0.75, per * 0.75, per * 1.35);
+        const line = fitLine(G, o, d, t0, t1, T * 0.75, Math.max(2.8, per * 0.4), per * 1.35);
         if (!line) continue;
         const tk = locateTicks(line.x, line.P);
 
@@ -435,11 +442,12 @@ const Ruler = (() => {
     const d = { x: (Q.x - P.x) / len, y: (Q.y - P.y) / len };
     const per = periodPx * G.scale;
     const R = per * 5;
-    const x = detrend(profile(G, P, d, -R, R), per * 0.75);
-    const tk = locateTicks(x, per, 3);
+    const ps = per * SUB;
+    const x = detrend(profile(G, P, d, -R, R), ps * 0.75);
+    const tk = locateTicks(x, ps, 3);
     if (!tk) return p;
-    const k = Math.round((R - tk.first) / per);
-    const t = -R + tk.first + k * per;
+    const k = Math.round((R * SUB - tk.first) / ps);
+    const t = -R + (tk.first + k * ps) / SUB;
     return { x: (P.x + d.x * t) / G.scale, y: (P.y + d.y * t) / G.scale };
   }
 

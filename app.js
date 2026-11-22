@@ -137,7 +137,7 @@ async function findRulerAuto() {
     console.error(err);
   }
   setBusy('');
-  update();
+  resegment();
 }
 
 // after the user moved the ruler: re-read ticks near the new position
@@ -159,6 +159,10 @@ function rulerAfterUserMove(d) {
     if (res) applyRuler(res, 'Ticks read along your line');
     else state.rulerSource = 'no tick marks found along the line – enter the length manually';
   } catch (err) { console.error(err); }
+}
+
+function resegment() {
+  if (state.lastMethod === 'seed' && state.seed) segmentSeed(); else segmentBox();
 }
 
 /* ------------------------------------------------------------ color math */
@@ -298,6 +302,11 @@ function segmentBox() {
   const edges = edgeMap(x0, y0, bw, bh);
   for (let i = 0; i < fg.length; i++) if (edges[i]) fg[i] = 1;
 
+  // the ruler itself is never the object (it often lies right next to it)
+  const rm = rulerMask();
+  if (rm) for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++)
+    if (rm[(y + y0) * W + (x + x0)]) fg[y * bw + x] = 0;
+
   // 5. close small gaps in the outline, fill everything enclosed by it,
   //    then open to cut thin bridges (background texture, the ruler …)
   const rc = Math.max(2, Math.round(Math.max(bw, bh) * 0.006));
@@ -319,12 +328,81 @@ function segmentBox() {
   comp = bestComponent(comp, bw, bh, state.boxFromAI ? local : null) || comp;
   fillHoles(comp, bw, bh);
   if ($('convex').checked) comp = convexFill(comp, bw, bh);
+  if (rm) for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++)
+    if (rm[(y + y0) * W + (x + x0)]) comp[y * bw + x] = 0;
 
   state.mask.fill(0);
   for (let y = 0; y < bh; y++)
     for (let x = 0; x < bw; x++)
       if (comp[y * bw + x]) state.mask[(y + y0) * W + (x + x0)] = 1;
   update();
+}
+
+// Pixels of the ruler/tape body: walk across the ruler from the tick line
+// while pixels look like the ruler (its body color, or dark ticks/digits),
+// and along it beyond the detected ticks.
+function rulerMask() {
+  if (!state.periodPx || !state.ruler) return null;
+  const { W, H, lab } = state;
+  const { a, b } = state.ruler;
+  const len = Math.hypot(b.x - a.x, b.y - a.y);
+  if (len < 10) return null;
+  const d = { x: (b.x - a.x) / len, y: (b.y - a.y) / len }, n = { x: -d.y, y: d.x };
+  const mm = state.periodPx;
+  const px = (t, o) => {
+    const x = Math.round(a.x + d.x * t + n.x * o), y = Math.round(a.y + d.y * t + n.y * o);
+    return x < 0 || y < 0 || x >= W || y >= H ? -1 : (y * W + x) * 3;
+  };
+  // body color: brighter half of the pixels around the tick line
+  const cs = [];
+  for (let t = 0; t <= len; t += 2) for (let o = -2 * mm; o <= 2 * mm; o += 2) {
+    const i = px(t, o);
+    if (i >= 0) cs.push([lab[i], lab[i + 1], lab[i + 2]]);
+  }
+  if (cs.length < 10) return null;
+  cs.sort((p, q) => p[0] - q[0]);
+  const bright = cs.slice(cs.length >> 1);
+  const med = (k) => bright.map((c) => c[k]).sort((p, q) => p - q)[bright.length >> 1];
+  const body = [med(0), med(1), med(2)];
+  const like = (i) => {
+    if (i < 0) return false;
+    const dL = lab[i] - body[0], dA = lab[i + 1] - body[1], dB = lab[i + 2] - body[2];
+    return dL * dL + dA * dA + dB * dB < 18 * 18 || lab[i] < body[0] - 25;
+  };
+  const maxO = 45 * mm, gapMax = Math.max(3, 2 * mm);
+  // width on both sides
+  const ext = {};
+  for (const side of [1, -1]) {
+    const v = [];
+    for (let t = 0; t <= len; t += Math.max(3, 5 * mm)) {
+      let last = 0, gap = 0;
+      for (let o = 0; o <= maxO; o++) {
+        if (like(px(t, side * o))) { last = o; gap = 0; } else if (++gap > gapMax) break;
+      }
+      v.push(last);
+    }
+    v.sort((p, q) => p - q);
+    ext[side] = v[v.length >> 1] || 0;
+  }
+  const o0 = -ext[-1] - 2, o1 = ext[1] + 2;
+  // extend along the ruler while a cross-section still looks like the ruler
+  const along = (dir) => {
+    let last = dir > 0 ? len : 0, gap = 0;
+    for (let t = last; t > -2 * (W + H) && t < 2 * (W + H); t += dir) {
+      let c = 0, all = 0;
+      for (let o = o0; o <= o1; o += 2) { const i = px(t, o); if (i >= 0) { all++; if (like(i)) c++; } }
+      if (!all) break;
+      if (c / all > 0.5) { last = t; gap = 0; } else if (++gap > 4 * mm + 3) break;
+    }
+    return last;
+  };
+  const tA = along(-1) - 2, tB = along(1) + 2;
+  const m = new Uint8Array(W * H);
+  for (let t = tA; t <= tB; t += 0.5) for (let o = o0; o <= o1; o += 0.5) {
+    const i = px(t, o);
+    if (i >= 0) m[i / 3] = 1;
+  }
+  return m;
 }
 
 // Region growing from a tapped point
