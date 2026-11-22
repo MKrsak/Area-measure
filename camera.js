@@ -104,11 +104,23 @@ const LevelCam = (() => {
     document.body.style.overflow = 'hidden';
     try { await video.play(); } catch { /* autoplay attribute */ }
 
-    // 2× zoom (less perspective) where the camera supports it
+    // start at 2× zoom (less perspective, box sides stay out of view) where
+    // the camera allows it; the button switches between 2× and 1×
     zoomed = false;
-    const caps = track.getCapabilities ? track.getCapabilities() : {};
-    el('camZoom').hidden = !(caps.zoom && caps.zoom.max >= 2);
     el('camZoom').classList.remove('on');
+    el('camZoom').hidden = true;
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if (!caps.zoom || caps.zoom.max >= 2) {
+      try {
+        await track.applyConstraints({ advanced: [{ zoom: 2 }] });
+        const set = track.getSettings ? track.getSettings() : {};
+        if (set.zoom === 2 || (caps.zoom && caps.zoom.max >= 2)) {
+          zoomed = true;
+          el('camZoom').hidden = false;
+          el('camZoom').classList.add('on');
+        }
+      } catch { /* no zoom on this camera / browser */ }
+    }
 
     tilt = null; okSince = 0; busy = false; sensorSeen = false; lastOrient = 0; noSensor = false;
     el('camHint').textContent = OK_HINT;
