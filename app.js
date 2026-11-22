@@ -82,7 +82,7 @@ function loadImage(src) {
     feat: blurLab(toFeat(data, W, H), W, H),
     mask: new Uint8Array(W * H),
     maskCanvas: document.createElement('canvas'),
-    seed: null, objectName: '', src, G: null, periodPx: 0, tickPx: 0, perTick: 1,
+    seed: null, objectName: '', src, G: null, periodPx: 0, tickPx: 0, perTick: 1, persp: null,
     rulerSource: 'not set – place the red handles on the ruler', boxFromAI: false,
     objectSource: 'image analysis (whole photo)',
   });
@@ -119,6 +119,10 @@ function applyRuler(res, how) {
   state.tickPx = res.tickPx * k;           // work px per visible tick
   state.perTick = res.perTick;             // mm per visible tick (1 or 5)
   state.rulerKind = res.kind;
+  // how the scale changes along the ruler (tilted camera) – used per pixel
+  state.persp = res.grad ? {
+    cx: res.grad.c.x * k, cy: res.grad.c.y * k, dx: res.grad.d.x, dy: res.grad.d.y, rel: res.grad.rel / k,
+  } : null;
   if (res.kind === 'unknown') {
     // ticks found, but not whether they are 1 mm, 5 mm or 1 cm apart
     state.rulerSource = `${how}: handles placed on tick marks, but their spacing is unclear – type the real distance between the handles`;
@@ -181,7 +185,7 @@ function rulerAfterUserMove(d) {
     const res = Ruler.zoomRefine(state.src, toSrc(state.ruler.a), toSrc(state.ruler.b),
       { half: Math.max(15, maxSide() * 0.015), imperial: imperial() });
     if (res) applyRuler(res, 'Ticks read along your line');
-    else state.rulerSource = 'no tick marks recognised along the line – set the handles on two marks and type their distance';
+    else state.persp = null, state.rulerSource = 'no tick marks recognised along the line – set the handles on two marks and type their distance';
   } catch (err) {
     console.error(err);
     state.rulerSource = `reading the ticks failed (${err && err.message ? err.message : err}) – type the length by hand`;
@@ -386,6 +390,7 @@ function segmentBox(shadowMode = 2) {
   const rm = rulerMask();
   if (rm) for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++)
     if (rm[(y + y0) * W + (x + x0)]) fg[y * bw + x] = 0;
+  if (rm) fillUnderRuler(fg, rm, x0, y0, bw, bh);
 
   // 5. close small gaps in the outline, fill everything enclosed by it,
   //    then open to cut thin bridges (background texture, the ruler …)
@@ -412,6 +417,7 @@ function segmentBox(shadowMode = 2) {
   if ($('convex').checked) comp = convexFill(comp, bw, bh);
   if (rm) for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++)
     if (rm[(y + y0) * W + (x + x0)]) comp[y * bw + x] = 0;
+  if (rm) fillUnderRuler(comp, rm, x0, y0, bw, bh);
 
   // (almost) nothing left? the object probably looked like a shadow – retry milder
   let cnt = 0;
@@ -498,7 +504,27 @@ function rulerMask() {
     const i = px(t, o);
     if (i >= 0) m[i / 3] = 1;
   }
+  m.geom = { a, d, n, o0, o1 };
   return m;
+}
+
+// The ruler may lie ON the object (best for thick objects): where the object
+// continues on both sides of the ruler strip, the strip belongs to the object.
+function fillUnderRuler(comp, rm, x0, y0, bw, bh) {
+  const { W } = state, g = rm.geom, gap = 4;
+  const inC = (X, Y) => {
+    const x = Math.round(X) - x0, y = Math.round(Y) - y0;
+    return x >= 0 && y >= 0 && x < bw && y < bh && comp[y * bw + x] === 1;
+  };
+  const add = [];
+  for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+    if (!rm[(y + y0) * W + x + x0] || comp[y * bw + x]) continue;
+    const X = x + x0, Y = y + y0;
+    const o = (X - g.a.x) * g.n.x + (Y - g.a.y) * g.n.y;          // offset across the strip
+    const up = g.o1 - o + gap, dn = o - g.o0 + gap;
+    if (inC(X + g.n.x * up, Y + g.n.y * up) && inC(X - g.n.x * dn, Y - g.n.y * dn)) add.push(y * bw + x);
+  }
+  for (const i of add) comp[i] = 1;
 }
 
 // 1 where a pixel is background seen in different light (see segmentBox 3b)
@@ -924,7 +950,24 @@ function computeArea() {
     return;
   }
   const pxPerUnit = rulerPx / len;
-  const area = count / (pxPerUnit * pxPerUnit);
+  // tilted camera: the scale changes across the photo. The ruler shows how it
+  // changes along its direction; every object pixel is weighted with the
+  // scale at its own position (relative to the scale between the handles).
+  let weighted = count, tiltNote = '';
+  const P = state.persp;
+  if (P && count) {
+    const f = (x, y) => Math.min(2, Math.max(0.5, 1 + P.rel * ((x - P.cx) * P.dx + (y - P.cy) * P.dy)));
+    const fm = f((ruler.a.x + ruler.b.x) / 2, (ruler.a.y + ruler.b.y) / 2);
+    weighted = 0;
+    const W = state.W;
+    for (let i = 0; i < mask.length; i++) if (mask[i]) {
+      const r = fm / f(i % W, (i / W) | 0);
+      weighted += r * r;
+    }
+    const change = Math.abs(P.rel) * rulerPx * 100;
+    if (change >= 0.5) tiltNote = ` · tilt corrected (scale changes ${change.toFixed(1)} % along the ruler)`;
+  }
+  const area = weighted / (pxPerUnit * pxPerUnit);
   // convert to cm² as the main readout, plus the chosen unit
   const toCm = { cm: 1, mm: 0.1, in: 2.54 }[unit];
   const areaCm2 = area * toCm * toCm;
@@ -935,7 +978,7 @@ function computeArea() {
   $('areaValue').textContent = count ? main : '–';
   $('areaDetail').textContent = count ? '' : 'No object found – drag a box around it or tap on it.';
   $('srcObject').textContent = state.objectSource;
-  $('srcRuler').textContent = `${state.rulerSource} → ${len} ${unit} = ${rulerPx.toFixed(0)} px`;
+  $('srcRuler').textContent = `${state.rulerSource} → ${len} ${unit} = ${rulerPx.toFixed(0)} px${tiltNote}`;
 }
 
 function fmt(v) {

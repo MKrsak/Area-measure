@@ -73,7 +73,8 @@ canvas {
   background: var(--bg); color: var(--text); font: inherit; min-width: 0;
 }
 .controls input[type=number] { flex: 1; }
-.tips ul { margin: 0 0 8px; padding-left: 20px; }
+.tips ul, .tips ol { margin: 0 0 12px; padding-left: 20px; }
+.tips li { margin-bottom: 4px; }
 .small { font-size: .82rem; color: var(--muted); margin: 0; }
 @media (max-width: 560px) {
   .controls { grid-template-columns: 1fr; }

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Area Measure</title>
   <meta name="description" content="Take a photo of an object next to a ruler and measure its area.">
-  <link rel="stylesheet" href="style.css?v=8">
+  <link rel="stylesheet" href="style.css?v=9">
 </head>
 <body>
   <header>
@@ -25,6 +25,7 @@
           <input id="fileInput" type="file" accept="image/*" hidden>
         </label>
       </div>
+      <p class="status"><a href="#tips">📋 How to take a photo for accurate results</a></p>
       <p id="aiStatus" class="status">Checking for Chrome built-in AI…</p>
     </section>
 
@@ -75,20 +76,26 @@
       <p id="aiResult" class="status"></p>
     </section>
 
-    <section class="card tips">
-      <h2>Tips for accurate results</h2>
+    <section class="card tips" id="tips">
+      <h2>How to take a good photo</h2>
+      <ol>
+        <li><b>Ruler at the same height as the measured surface.</b> Flat things (paper, leaf): ruler right next to them. Thick things (box, book): lay the ruler <b>on top</b> of the object – the app ignores the ruler there. Each cm of height difference costs about 2–4 % of area.</li>
+        <li><b>Phone parallel to the surface</b>, straight above the middle of the object – not tilted. The app corrects some tilt along the ruler, but not across it.</li>
+        <li><b>Step back and zoom 2×</b> rather than getting close: less perspective, the sides of a box stay out of view. Object and ruler should still fill most of the picture.</li>
+        <li><b>Ruler flat and straight</b>, close to the object, at least 10 cm of it visible, mm marks sharp. Do not hold up the end of a tape – weigh it down.</li>
+        <li><b>Plain background with a different color</b> than the object, soft even light, no flash.</li>
+      </ol>
+      <h2>Checking the result</h2>
       <ul>
-        <li>Shoot straight from above, with the ruler lying flat in the <b>same plane</b> as the object.</li>
-        <li>Use a plain, contrasting background and even lighting (avoid strong shadows).</li>
-        <li>The ruler is read automatically on a best-effort basis: the app finds it, zooms in on it at full resolution and puts the handles on cm marks. Always check them. If it misses, drag the red line roughly onto the ruler – it zooms in there and reads the ticks – or drag a handle (it snaps to the nearest tick), or type the length yourself.</li>
-        <li>If the outline is wrong, drag a box around the object or tap on it, and adjust the sensitivity.</li>
+        <li>The red handles should sit on two tick marks. If not, drag the red line roughly onto the ruler (it zooms in and reads the ticks), drag a handle (it snaps to the nearest tick), or type the length.</li>
+        <li>If the green outline is wrong, drag a box around the object or tap on it, and adjust the sensitivity.</li>
       </ul>
-      <p class="small">Chrome AI uses Gemini Nano running locally in Chrome (Prompt API with image input). Your photo never leaves your device. If it is not available, everything still works with the built-in image analysis and manual adjustment.</p>
+      <p class="small">Chrome AI (Gemini Nano, desktop Chrome only) runs locally – your photo never leaves your device. Everything else works on any device without it.</p>
     </section>
   </main>
 
-  <p class="version">Version 8</p>
-  <script src="ruler.js?v=8"></script>
-  <script src="app.js?v=8"></script>
+  <p class="version">Version 9</p>
+  <script src="ruler.js?v=9"></script>
+  <script src="app.js?v=9"></script>
 </body>
 </html>

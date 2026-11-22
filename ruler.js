@@ -417,7 +417,13 @@ const Ruler = (() => {
   function finish(G, line, P, opts = {}) {
     const tk = locateTicks(line.x, P);
     if (!tk || tk.count < 5) return null;
-    const cls = classify(tickLengths(G, line, tk), opts.imperial);
+    let cls = classify(tickLengths(G, line, tk), opts.imperial);
+    // plausibility: a photo of an object with a ruler shows roughly 5 cm … 1.5 m.
+    // If "5 mm ticks" would mean a much larger view, they are really 1 mm ticks
+    // (tiny ticks make the long/short pattern unreliable)
+    const srcLong = opts.srcLong || Math.max(G.w, G.h) / G.scale;
+    const tickSrc = P / SUB / G.scale;
+    if (cls.perTick === 5 && srcLong / (tickSrc / 5) > 1500) cls = { perTick: 1, kind: '1 mm', res: undefined, mod: undefined };
     let k0, k1;
     if (cls.mod && tk.count >= cls.mod) {
       // from the first to the last long (cm / inch) mark
@@ -432,7 +438,33 @@ const Ruler = (() => {
     const tA = line.t0 + (tk.first + k0 * P) / SUB, tB = line.t0 + (tk.first + k1 * P) / SUB;
     const { o, d } = line;
     const tickPx = P / SUB / G.scale;
+    // perspective: a tilted camera makes the tick spacing change along the
+    // ruler. Measure the spacing in several pieces and fit a straight line.
+    let grad = null;
+    const span = tk.end - tk.start, nC = Math.min(6, Math.floor(span / (P * 25)));
+    if (nC >= 3) {
+      const xs = [], ys = [];
+      for (let c = 0; c < nC; c++) {
+        const a = tk.start + Math.round(c * span / nC), b = tk.start + Math.round((c + 1) * span / nC);
+        const pc = refinePeriod(line.x.subarray(a, b), P);
+        if (Math.abs(pc / P - 1) < 0.25) { xs.push((a + b) / 2); ys.push(pc); }
+      }
+      if (xs.length >= 3) {
+        // robust straight line (median of pairwise slopes): one bad piece,
+        // e.g. the metal end of a tape, must not spoil it
+        const sl = [];
+        for (let i = 0; i < xs.length; i++) for (let j = i + 1; j < xs.length; j++) sl.push((ys[j] - ys[i]) / (xs[j] - xs[i]));
+        sl.sort((p, q) => p - q);
+        const g = sl[sl.length >> 1];
+        const ic = xs.map((x, i) => ys[i] - g * x).sort((p, q) => p - q)[xs.length >> 1];
+        const mx = xs.reduce((p, q) => p + q) / xs.length, my = ic + g * mx;
+        const tm = line.t0 + mx / SUB;
+        // relative change of the scale per source pixel along the ruler
+        if (Math.abs(g * span) < 0.4 * my) grad = { c: toSrc(G, { x: o.x + d.x * tm, y: o.y + d.y * tm }), d, rel: g / my * SUB * G.scale };
+      }
+    }
     return {
+      grad,
       a: toSrc(G, { x: o.x + d.x * tA, y: o.y + d.y * tA }),
       b: toSrc(G, { x: o.x + d.x * tB, y: o.y + d.y * tB }),
       ticks: (k1 - k0) * cls.perTick,          // in mm (or 1/16 in)
@@ -525,7 +557,8 @@ const Ruler = (() => {
         if (!line) continue;
         const tk = locateTicks(line.x, line.P);
 
-        if (!tk || tk.count < 15 || line.r < 0.5) continue;
+        // a faint pattern is accepted only if it is a long regular run of ticks
+        if (!tk || tk.count < 15 || line.r < (tk.count >= 80 ? 0.28 : 0.5)) continue;
         const score = line.r * tk.count * Math.min(2, tk.sharp) * Math.min(4, band.iso);
         if (!best || score > best.score) best = { line, score };
       }
@@ -556,7 +589,7 @@ const Ruler = (() => {
       if (!line || line.r < 0.45) continue;
       const tk = locateTicks(line.x, line.P);
       if (!tk || tk.count < 8) continue;
-      const res = finish(G, line, line.P, { imperial });
+      const res = finish(G, line, line.P, { imperial, srcLong: Math.max(src.width, src.height) });
       if (res) return res;
     }
     return null;
